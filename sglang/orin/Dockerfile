@@ -47,15 +47,25 @@ RUN sed -i \
  && grep -q 'exist_ok=True' \
         ${VENV}/lib/python3.12/site-packages/vllm/transformers_utils/configs/ovis.py
 
-# Build-time guards: if any of these fail, fail the build instead of
-# publishing a broken image. INFR-91's CPU-torch regression would have been
-# caught by the first one.
-RUN ${VENV}/bin/python3 -c "import torch; assert torch.version.cuda is not None, f'CPU-only torch: {torch.__version__}'; print('torch:', torch.__version__, 'cuda:', torch.version.cuda)" \
+# Build-time guards: GPU-less CI runner constrains us to metadata-level
+# checks. Anything that transitively imports sgl_kernel runs its
+# `_load_architecture_specific_ops()` which probes for a CUDA device — no
+# device on the runner means import fails even when the wheel is correct
+# (sgl_kernel ships sm90/sm100 variants and falls back at runtime on real
+# hardware; the fallback only fires under a real GPU). So at build time
+# we verify only what's checkable without GPU; deep checks (sgl_kernel
+# import, gpt_oss arch import, launch_server import) are documented in
+# runbooks/hephaestus-deploy.md §2 and run on-hardware after pull.
+#
+# What WOULD have caught INFR-91's CPU-torch regression: the first guard.
+# That's the high-value one — keep it strict.
+COPY validate-on-hardware.sh /opt/sglang/validate-on-hardware.sh
+RUN chmod +x /opt/sglang/validate-on-hardware.sh \
+ && ${VENV}/bin/python3 -c "import torch; assert torch.version.cuda is not None, f'CPU-only torch: {torch.__version__}'; print('torch:', torch.__version__, 'cuda:', torch.version.cuda)" \
  && ${VENV}/bin/python3 -c "import triton; print('triton:', triton.__version__)" \
- && ${VENV}/bin/python3 -c "import sgl_kernel; print('sgl_kernel: OK')" \
- && ${VENV}/bin/python3 -c "import sglang; print('sglang:', sglang.__version__)" \
- && ${VENV}/bin/python3 -c "import sglang.srt.models.gpt_oss as m; print('gpt_oss:', m.__file__)" \
- && ${VENV}/bin/python3 -c "from sglang.srt.entrypoints.http_server import launch_server; print('launch_server: OK')"
+ && ${VENV}/bin/python3 -c "import importlib.metadata as m; v=m.version('sglang'); assert v.startswith('${SGLANG_VERSION}'), f'wrong sglang: {v}'; print('sglang metadata:', v)" \
+ && ${VENV}/bin/python3 -c "import importlib.metadata as m; v=m.version('sgl-kernel'); assert v == '${SGL_KERNEL_VERSION}', f'wrong sgl-kernel: {v}'; print('sgl-kernel metadata:', v)" \
+ && ${VENV}/bin/python3 -c "import importlib.util as u; assert u.find_spec('sglang.srt.models.gpt_oss') is not None, 'gpt_oss arch module missing'; print('gpt_oss module: present')"
 
 # Step 5: Bake Llama-3 family tokenizer dirs (INFR-78).
 COPY bake-tokenizers.sh /tmp/
