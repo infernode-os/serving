@@ -51,8 +51,24 @@ serving/
 │   ├── hephaestus-deploy.md
 │   └── ...
 └── .github/workflows/
-    └── build-jetson-container.yml   self-hosted runner on Hephaestus
+    └── build-sglang.yml   GitHub-hosted ubuntu-24.04-arm runner
 ```
+
+## Visibility + CI
+
+The repo is **public** (changed 2026-05-14 to qualify for free
+`ubuntu-24.04-arm` GitHub-hosted runner minutes). No secrets or
+credentials in the tree; `.gitignore` excludes anything credential-
+shaped.
+
+Builds run on **GitHub-hosted `ubuntu-24.04-arm`** (Graviton-class
+SBSA). Native aarch64 — no QEMU — and `nvcc` cross-compiles for
+sm_87 (Orin) and sm_103 (Thor) via `TORCH_CUDA_ARCH_LIST` at build
+time. The output is a Jetson-Tegra-targeted image; GitHub's hosted
+runners have no Jetson hardware, so end-to-end smoke testing (CUDA
+paths actually executing) happens manually on Hephaestus after each
+successful CI build. Acceptable for v0; a self-hosted test runner
+on Hephaestus can be added later if the manual step becomes a chore.
 
 The `sglang/` subtree is intended to vendor the canonical
 [`dusty-nv/jetson-containers`](https://github.com/dusty-nv/jetson-containers/tree/master/packages/llm/sglang)
