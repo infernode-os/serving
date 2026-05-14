@@ -67,8 +67,10 @@ sm_87 (Orin) and sm_103 (Thor) via `TORCH_CUDA_ARCH_LIST` at build
 time. The output is a Jetson-Tegra-targeted image; GitHub's hosted
 runners have no Jetson hardware, so end-to-end smoke testing (CUDA
 paths actually executing) happens manually on Hephaestus after each
-successful CI build. Acceptable for v0; a self-hosted test runner
-on Hephaestus can be added later if the manual step becomes a chore.
+successful CI build. **Hephaestus must never be configured as a
+GitHub self-hosted runner**, and the remote CI must not hold any
+secrets that link back to the device — the public CI surface stays
+strictly isolated from the dev box.
 
 The `sglang/` subtree is intended to vendor the canonical
 [`dusty-nv/jetson-containers`](https://github.com/dusty-nv/jetson-containers/tree/master/packages/llm/sglang)

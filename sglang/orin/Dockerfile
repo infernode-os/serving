@@ -19,7 +19,8 @@ ARG SGLANG_VERSION \
     IS_SBSA \
     FORCE_BUILD=off \
     TMP=/tmp/sglang \
-    TOKENIZER_DIR=/opt/tokenizers
+    TOKENIZER_DIR=/opt/tokenizers \
+    PIP_WHEEL_DIR=/opt/wheels
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
@@ -32,6 +33,14 @@ RUN apt-get update -y && \
         libgl1 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# install.sh + build.sh are vendored verbatim from dusty-nv/jetson-containers and
+# assume the framework's parent stages have already provided `uv` on PATH and
+# exported PIP_WHEEL_DIR. We satisfy both prereqs at the Dockerfile layer so the
+# vendored scripts stay untouched (clean diffs against upstream re-syncs).
+ENV PIP_WHEEL_DIR=${PIP_WHEEL_DIR}
+RUN mkdir -p ${PIP_WHEEL_DIR} && \
+    pip install --no-cache-dir uv
 
 # Vendored SGLang install (pip-first; falls back to source build on failure).
 COPY build.sh install.sh $TMP/
