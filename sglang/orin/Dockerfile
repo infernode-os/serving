@@ -39,8 +39,13 @@ RUN apt-get update -y && \
 # exported PIP_WHEEL_DIR. We satisfy both prereqs at the Dockerfile layer so the
 # vendored scripts stay untouched (clean diffs against upstream re-syncs).
 ENV PIP_WHEEL_DIR=${PIP_WHEEL_DIR}
+# dustynv/pytorch ships pip pre-configured for the JetPack PyPI mirror
+# (pypi.jetson-ai-lab.io/jp6/cu128/+simple/) which carries Jetson-built
+# wheels for torch/transformers but does NOT carry `uv`. Force upstream
+# PyPI for the uv install only; subsequent SGLang installs flow through
+# install.sh which uses `uv` itself and still benefits from the mirror.
 RUN mkdir -p ${PIP_WHEEL_DIR} && \
-    pip install --no-cache-dir uv
+    pip install --no-cache-dir --index-url https://pypi.org/simple uv
 
 # Vendored SGLang install (pip-first; falls back to source build on failure).
 COPY build.sh install.sh $TMP/
