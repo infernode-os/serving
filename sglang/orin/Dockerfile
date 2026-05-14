@@ -40,12 +40,20 @@ RUN apt-get update -y && \
 # vendored scripts stay untouched (clean diffs against upstream re-syncs).
 ENV PIP_WHEEL_DIR=${PIP_WHEEL_DIR}
 # dustynv/pytorch ships pip pre-configured for the JetPack PyPI mirror
-# (pypi.jetson-ai-lab.io/jp6/cu128/+simple/) which carries Jetson-built
-# wheels for torch/transformers but does NOT carry `uv`. Force upstream
-# PyPI for the uv install only; subsequent SGLang installs flow through
-# install.sh which uses `uv` itself and still benefits from the mirror.
+# (pypi.jetson-ai-lab.dev/jp6/cu128/) which carries Jetson-built wheels
+# for torch/triton/etc. with sm_87 device code, but does NOT carry `uv`.
+# So: install uv from upstream PyPI (one-shot), then point uv at the
+# JetPack mirror for everything else. Critical: `uv` ignores PIP_*
+# env vars — it only reads UV_*. Without UV_INDEX_URL set, uv resolves
+# `sglang[all]`'s transitive torch dep to the upstream CPU wheel and
+# clobbers the base image's CUDA torch (smoke-tested: torch 2.9.1+cpu
+# on a Tegra GPU, no CUDA visible inside the container).
 RUN mkdir -p ${PIP_WHEEL_DIR} && \
     pip install --no-cache-dir --index-url https://pypi.org/simple uv
+
+ENV UV_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu128 \
+    UV_EXTRA_INDEX_URL=https://pypi.org/simple \
+    UV_INDEX_STRATEGY=unsafe-best-match
 
 # Vendored SGLang install (pip-first; falls back to source build on failure).
 COPY build.sh install.sh $TMP/
