@@ -20,9 +20,13 @@ on:
       orin_base_image:
         description: 'BASE_IMAGE arg for the Orin build'
         required: false
-        default: 'dustynv/pytorch:2.6-r36.4.0-cu128-24.04'
+        default: 'dustynv/sglang:r36.4-cu129-24.04'
       sglang_version:
         description: 'SGLANG_VERSION override (Orin only)'
+        required: false
+        default: ''
+      sgl_kernel_version:
+        description: 'SGL_KERNEL_VERSION override (Orin only)'
         required: false
         default: ''
 
@@ -33,15 +37,14 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/serving-sglang
-  # Default Orin base — overridable via workflow_dispatch. The dustynv
-  # PyTorch base ships a torch built with USE_DISTRIBUTED=1 and sm_87
-  # device code; that's the combination the spike (INFR-68) found was
-  # the only one that lets SGLang's import chain succeed on Orin/JP6.
-  # cu128-24.04 is the current published JP6 line on Docker Hub (the
-  # earlier cu126-22.04 / Python 3.10 variant the spike used has been
-  # superseded; Python 3.12 in-container is fine — only the spike's
-  # hand-extracted-onto-host setup needed host Python alignment).
-  ORIN_BASE_IMAGE_DEFAULT: 'dustynv/pytorch:2.6-r36.4.0-cu128-24.04'
+  # Default Orin base — dustynv's pre-built SGLang image with torch 2.8.0
+  # built for cu129 + sm_87 + cp312. We layer a delta upgrade on top to
+  # bump dustynv's bundled SGLang 0.4.9 (no gpt_oss.py) to 0.5.4 (has it).
+  # See sglang/orin/Dockerfile for full rationale; INFR-91 for the
+  # investigation that led to this base choice.
+  ORIN_BASE_IMAGE_DEFAULT: 'dustynv/sglang:r36.4-cu129-24.04'
+  ORIN_SGLANG_VERSION_DEFAULT: '0.5.4'
+  ORIN_SGL_KERNEL_VERSION_DEFAULT: '0.3.16.post3'
 
 jobs:
   build:
@@ -136,10 +139,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BASE_IMAGE=${{ inputs.orin_base_image || env.ORIN_BASE_IMAGE_DEFAULT }}
-            SGLANG_VERSION=${{ inputs.sglang_version || '0.5.3' }}
-            SGLANG_VERSION_SPEC=${{ inputs.sglang_version || '0.5.3' }}
-            IS_SBSA=0
-            FORCE_BUILD=off
+            SGLANG_VERSION=${{ inputs.sglang_version || env.ORIN_SGLANG_VERSION_DEFAULT }}
+            SGL_KERNEL_VERSION=${{ inputs.sgl_kernel_version || env.ORIN_SGL_KERNEL_VERSION_DEFAULT }}
           cache-from: type=gha,scope=sglang-orin
           cache-to: type=gha,scope=sglang-orin,mode=max
 
