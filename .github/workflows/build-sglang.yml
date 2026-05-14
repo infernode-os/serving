@@ -20,7 +20,7 @@ on:
       orin_base_image:
         description: 'BASE_IMAGE arg for the Orin build'
         required: false
-        default: 'dustynv/pytorch:2.6-r36.4.0-cu126-22.04'
+        default: 'dustynv/pytorch:2.6-r36.4.0-cu128-24.04'
       sglang_version:
         description: 'SGLANG_VERSION override (Orin only)'
         required: false
@@ -37,7 +37,11 @@ env:
   # PyTorch base ships a torch built with USE_DISTRIBUTED=1 and sm_87
   # device code; that's the combination the spike (INFR-68) found was
   # the only one that lets SGLang's import chain succeed on Orin/JP6.
-  ORIN_BASE_IMAGE_DEFAULT: 'dustynv/pytorch:2.6-r36.4.0-cu126-22.04'
+  # cu128-24.04 is the current published JP6 line on Docker Hub (the
+  # earlier cu126-22.04 / Python 3.10 variant the spike used has been
+  # superseded; Python 3.12 in-container is fine — only the spike's
+  # hand-extracted-onto-host setup needed host Python alignment).
+  ORIN_BASE_IMAGE_DEFAULT: 'dustynv/pytorch:2.6-r36.4.0-cu128-24.04'
 
 jobs:
   build:

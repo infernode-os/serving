@@ -11,11 +11,11 @@ diverged from upstream.
 |---|---|
 | GPU | Ampere Tegra (`sm_87`) |
 | JetPack | 6.x (R36.4 series) |
-| CUDA | 12.6 |
-| cuDNN | 9.3 |
+| CUDA (container) | 12.8 (forward-compat with JP6.x's 12.6 driver) |
+| cuDNN | 9.x |
 | L4T base | `r36.4.0` |
-| Python | 3.10 |
-| PyTorch | 2.5–2.6 (`USE_DISTRIBUTED=1`, `TORCH_CUDA_ARCH_LIST=8.7`) |
+| Python (container) | 3.12 |
+| PyTorch | 2.6 (`USE_DISTRIBUTED=1`, `TORCH_CUDA_ARCH_LIST=8.7`) |
 
 ## Pinned version
 
@@ -44,7 +44,7 @@ When the CI image is unavailable or you're iterating on the recipe:
 ```sh
 cd ~/serving/sglang/orin
 docker build \
-  --build-arg BASE_IMAGE=dustynv/pytorch:2.6-r36.4.0-cu126-22.04 \
+  --build-arg BASE_IMAGE=dustynv/pytorch:2.6-r36.4.0-cu128-24.04 \
   --build-arg SGLANG_VERSION=0.5.3 \
   --build-arg SGLANG_VERSION_SPEC=0.5.3 \
   --build-arg IS_SBSA=0 \
@@ -53,8 +53,9 @@ docker build \
 
 (The exact `BASE_IMAGE` tag depends on what dustynv has published at
 the time. Use `dustynv/pytorch` rather than `dustynv/sglang` to avoid
-inheriting their stale 0.4.1 install; we re-install our pinned 0.5.x
-fresh via `install.sh` / `build.sh`.)
+inheriting their stale SGLang install; we re-install our pinned 0.5.x
+fresh via `install.sh` / `build.sh`. Check
+<https://hub.docker.com/r/dustynv/pytorch/tags> for current options.)
 
 ## Files
 
