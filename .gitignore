@@ -1,0 +1,29 @@
+# OS / editor
+.DS_Store
+*.swp
+*~
+
+# Build / scratch
+build/
+dist/
+*.log
+*.tmp
+scratch/
+
+# Docker / container build
+*.tar
+*.tar.gz
+oci-layout/
+
+# Python (if any helper scripts)
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+
+# Secrets — never commit
+*.env
+.env.*
+*.key
+*.pem
+credentials*
