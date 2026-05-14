@@ -45,16 +45,17 @@ Per the [NGC SGLang 25.10 release notes](https://docs.nvidia.com/deeplearning/fr
 ## Build
 
 CI matrix-builds both variants on `ubuntu-24.04-arm`; the Thor variant
-is a `FROM nvcr.io/nvidia/sglang:25.10-py3` + thin overlay, so the
-build is mostly a re-tag with our overlay scripts. See
+is `FROM nvcr.io/nvidia/sglang:25.10-py3` + thin overlay, so the build
+is mostly a re-tag with our overlay scripts. See
 `.github/workflows/build-sglang.yml`.
 
-NGC auth is required for the pull (free NGC account works; the CI
-workflow expects `NGC_API_KEY` as a repo secret).
+NGC SGLang containers are anonymously pullable from `nvcr.io` — no
+auth required for the default tag. If NVIDIA ever gates a tag we want,
+set the `NGC_API_KEY` repo secret and the workflow's optional login
+step will fire automatically.
 
-## Manual build on a Thor host (when one exists)
+## Manual build
 
 ```sh
-echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
 docker build -t serving-sglang:thor-local sglang/thor/
 ```

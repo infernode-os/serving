@@ -43,10 +43,6 @@ jobs:
   build:
     name: build-${{ matrix.variant }}
     runs-on: ubuntu-24.04-arm
-    # Thor needs NGC auth and only runs on push to main / tags / manual
-    # dispatch. PRs from forks have no access to NGC_API_KEY and would
-    # fail at the login step.
-    if: matrix.variant != 'thor' || github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -78,8 +74,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to NGC (Thor only)
+      # NGC SGLang containers are anonymously pullable from nvcr.io —
+      # NGC auth is only needed for gated content (which the Thor base
+      # isn't). This step runs only when NGC_API_KEY is set, so it stays
+      # forward-compatible with any future gated variant.
+      - name: Check NGC auth
         if: matrix.variant == 'thor'
+        id: ngc
+        run: |
+          if [ -n "${{ secrets.NGC_API_KEY }}" ]; then
+            echo "use_auth=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "use_auth=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to NGC (Thor only, if secret set)
+        if: matrix.variant == 'thor' && steps.ngc.outputs.use_auth == 'true'
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: nvcr.io
