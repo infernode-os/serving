@@ -61,13 +61,31 @@ docker run --rm --gpus all --runtime nvidia serving-sglang:orin-local \
 
 End-to-end smoke testing happens **manually on Hephaestus** after each successful CI build — GitHub's hosted runners have no Jetson hardware. The deploy + healthcheck sequence is in `runbooks/hephaestus-deploy.md`.
 
-## Hephaestus disk policy (do NOT violate)
+## Hephaestus dual-purpose model (do NOT violate — INFR-90)
 
-Hephaestus (the Jetson Orin AGX dev box) deliberately keeps its root partition constrained to emulate a production single-disk node. There is a 916 GiB `/mnt/orin-ssd` for dev artefacts, but:
+Hephaestus serves two purposes that pull in opposite directions:
 
-- **Do not migrate Docker / containerd state from `/` to `/mnt/orin-ssd`.** That moves TAK/NERVA images onto the dev disk and breaks the production emulation.
-- The SGLang container is pulled to the root partition's Docker store, but **runtime data (HF cache, logs) is bind-mounted to `/mnt/orin-ssd`**. See `runbooks/hephaestus-deploy.md` §0 and §3.
-- If the root partition is tight, prune *only* old `serving-sglang` images — never TAK/NERVA images.
+1. **Field-parity reference** — TAK / NERVA / Ollama must run under a Docker daemon whose storage lives on the device's only disk (root partition), exactly as they would on a no-SSD field unit.
+2. **Development environment** — experimental work (SGLang, future Jetson experiments) needs the 916 GiB `/mnt/orin-ssd` and would crush the root partition if forced through the production daemon.
+
+A single Docker daemon has one storage root, so the only honest answer is **two daemons**:
+
+| Daemon | Socket | Storage | Used by |
+|---|---|---|---|
+| `docker.service` (production) | `/run/docker.sock` | root partition (with the Docker 29 quirk that its image content lives at `/var/lib/containerd` on root, regardless of where `/var/lib/docker` symlinks to) | TAK · NERVA · Ollama · field-parity workloads |
+| `docker-dev.service` (experimental) | `/run/docker-dev.sock` | `/mnt/orin-ssd/docker-dev` (own legacy snapshotter, `containerd-snapshotter: false`) | SGLang · any other Jetson experiment |
+
+**Rules for Claude when working on this host:**
+
+- For SGLang or any experimental work, use the dev daemon: `docker --host unix:///run/docker-dev.sock` (or set up `alias dev-docker=...`).
+- **Never** pull SGLang or other experimental images on the production daemon — its 12-14 GiB image plus working set would crush root.
+- **Never** migrate TAK / NERVA / Ollama to the dev daemon — they belong on production for field parity.
+- The runbook §0.1 has the full one-time setup if the dev daemon ever needs to be re-created.
+- Pre-flight any plan that involves `docker pull`/`docker run` by checking *which* daemon you're hitting. The default `docker` CLI uses the production daemon — easy to forget on Hephaestus.
+
+### Watch out: `/var/lib/docker` symlink is misleading
+
+`/var/lib/docker` is symlinked to `/mnt/orin-ssd/docker/docker` on this host, but `/var/lib/containerd` (the actual image content store under Docker 29's containerd integration) lives on root. So the symlink only redirects the daemon's *metadata*, not its *image content*. A pull on the production daemon will land on root regardless of what the symlink suggests. This was discovered the hard way (root went from 12 GiB → 877 MB free during a base-image pull); the dev daemon avoids the trap by disabling the containerd snapshotter entirely.
 
 ## Operational coexistence with Ollama
 
@@ -93,6 +111,16 @@ A pre-INFR-79 single-`LLM_BACKEND_URL` config must keep working unchanged. The b
 | `docs/SGLANG-ADOPTION-NOTES.md` | Spike findings, measured bake-off (SGLang ~78 tok/s @ N=8 vs Ollama's ~23 tok/s plateau), original launch flags |
 | `runbooks/hephaestus-deploy.md` | End-to-end Hephaestus deploy; acceptance gate is "new contributor brings SGLang up in <15 min" |
 | `runbooks/lucibridge-routing.md` | Routing config schema + per-tool / per-category mapping |
+
+## Vendored install-script gotchas (Orin Dockerfile)
+
+The dusty-nv `install.sh` / `build.sh` we vendor were designed to run *inside* the upstream jetson-containers framework, which provides a long chain of prereqs implicitly. Three of them bit us when we tried to build standalone, and the fixes all live in our `Dockerfile`:
+
+1. **`uv` is not on PATH in the base image.** Upstream chains a `uv`-install package as a previous stage. We `pip install uv` ourselves before invoking `install.sh`.
+2. **`PIP_WHEEL_DIR` is not exported.** Upstream sets it from a parent stage. We export it via `ENV` in our Dockerfile.
+3. **`uv` ignores `PIP_INDEX_URL`** — it only reads `UV_INDEX_URL` / `UV_EXTRA_INDEX_URL`. The dustynv base image sets `PIP_INDEX_URL` to the JetPack mirror (`https://pypi.jetson-ai-lab.dev/jp6/cu128`) which has Jetson-built CUDA wheels for torch/triton with `sm_87` device code. Without `UV_INDEX_URL` set, `uv pip install sglang[all]` resolves torch from upstream PyPI and pulls the **CPU wheel**, silently clobbering the base image's CUDA torch. The image then runs but reports `cuda False` on a Tegra GPU. We set `UV_INDEX_URL` + `UV_EXTRA_INDEX_URL` + `UV_INDEX_STRATEGY=unsafe-best-match` at the Dockerfile layer.
+
+**General rule when vendoring jetson-containers recipes:** verify every implicit framework dependency. Things to grep for in the vendored scripts that signal an implicit prereq: `uv` (the installer), `PIP_WHEEL_DIR`, `TORCH_CUDA_ARCH_LIST`, `IS_SBSA`, `FORCE_BUILD`, anything ending in `_VERSION`. Set them at the Dockerfile layer rather than patching the vendored scripts (keeps the diff against upstream clean).
 
 ## Conventions worth knowing
 
