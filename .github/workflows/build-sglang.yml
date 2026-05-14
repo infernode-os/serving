@@ -1,0 +1,153 @@
+name: build-sglang
+
+# CI for the SGLang container variants. Builds on GitHub-hosted
+# ubuntu-24.04-arm runners (Graviton SBSA, native aarch64 — no QEMU)
+# and pushes to GHCR. See INFR-75 and INFR-81 for design.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sglang/**'
+      - '.github/workflows/build-sglang.yml'
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'sglang/**'
+      - '.github/workflows/build-sglang.yml'
+  workflow_dispatch:
+    inputs:
+      orin_base_image:
+        description: 'BASE_IMAGE arg for the Orin build'
+        required: false
+        default: 'dustynv/pytorch:2.6-r36.4.0-cu126-22.04'
+      sglang_version:
+        description: 'SGLANG_VERSION override (Orin only)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/serving-sglang
+  # Default Orin base — overridable via workflow_dispatch. The dustynv
+  # PyTorch base ships a torch built with USE_DISTRIBUTED=1 and sm_87
+  # device code; that's the combination the spike (INFR-68) found was
+  # the only one that lets SGLang's import chain succeed on Orin/JP6.
+  ORIN_BASE_IMAGE_DEFAULT: 'dustynv/pytorch:2.6-r36.4.0-cu126-22.04'
+
+jobs:
+  build:
+    name: build-${{ matrix.variant }}
+    runs-on: ubuntu-24.04-arm
+    # Thor needs NGC auth and only runs on push to main / tags / manual
+    # dispatch. PRs from forks have no access to NGC_API_KEY and would
+    # fail at the login step.
+    if: matrix.variant != 'thor' || github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: orin
+            cuda_arch: '8.7'
+          - variant: thor
+            cuda_arch: '10.3a'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Show build host
+        run: |
+          set -x
+          uname -a
+          cat /etc/os-release
+          docker version
+          docker buildx version
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to NGC (Thor only)
+        if: matrix.variant == 'thor'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: nvcr.io
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+
+      - name: Compute tags + metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ matrix.variant }}-latest,enable={{is_default_branch}}
+            type=sha,prefix=${{ matrix.variant }}-,format=short
+            type=ref,event=tag,prefix=${{ matrix.variant }}-
+          labels: |
+            org.opencontainers.image.title=serving-sglang-${{ matrix.variant }}
+            org.opencontainers.image.description=SGLang for Jetson ${{ matrix.variant == 'orin' && 'Orin AGX (sm_87)' || 'Thor (sm_103)' }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Decide whether to push
+        id: push_decide
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Orin variant
+        if: matrix.variant == 'orin'
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: sglang/orin
+          file: sglang/orin/Dockerfile
+          platforms: linux/arm64
+          push: ${{ steps.push_decide.outputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ inputs.orin_base_image || env.ORIN_BASE_IMAGE_DEFAULT }}
+            SGLANG_VERSION=${{ inputs.sglang_version || '0.5.3' }}
+            SGLANG_VERSION_SPEC=${{ inputs.sglang_version || '0.5.3' }}
+            IS_SBSA=0
+            FORCE_BUILD=off
+          cache-from: type=gha,scope=sglang-orin
+          cache-to: type=gha,scope=sglang-orin,mode=max
+
+      - name: Build Thor variant
+        if: matrix.variant == 'thor'
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: sglang/thor
+          file: sglang/thor/Dockerfile
+          platforms: linux/arm64
+          push: ${{ steps.push_decide.outputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NGC_SGLANG_TAG=25.10-py3
+          cache-from: type=gha,scope=sglang-thor
+          cache-to: type=gha,scope=sglang-thor,mode=max
+
+      - name: Summarise
+        if: always()
+        run: |
+          echo "Variant: ${{ matrix.variant }}"
+          echo "Pushed: ${{ steps.push_decide.outputs.push }}"
+          echo "Tags:"
+          echo "${{ steps.meta.outputs.tags }}"
