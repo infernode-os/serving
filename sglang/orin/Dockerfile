@@ -39,21 +39,22 @@ RUN apt-get update -y && \
 # exported PIP_WHEEL_DIR. We satisfy both prereqs at the Dockerfile layer so the
 # vendored scripts stay untouched (clean diffs against upstream re-syncs).
 ENV PIP_WHEEL_DIR=${PIP_WHEEL_DIR}
-# dustynv/pytorch ships pip pre-configured for the JetPack PyPI mirror
-# (pypi.jetson-ai-lab.dev/jp6/cu128/) which carries Jetson-built wheels
-# for torch/triton/etc. with sm_87 device code, but does NOT carry `uv`.
-# So: install uv from upstream PyPI (one-shot), then point uv at the
-# JetPack mirror for everything else. Critical: `uv` ignores PIP_*
-# env vars — it only reads UV_*. Without UV_INDEX_URL set, uv resolves
-# `sglang[all]`'s transitive torch dep to the upstream CPU wheel and
-# clobbers the base image's CUDA torch (smoke-tested: torch 2.9.1+cpu
-# on a Tegra GPU, no CUDA visible inside the container).
+# dustynv/pytorch sets PIP_INDEX_URL to https://pypi.jetson-ai-lab.dev/jp6/cu128
+# but that mirror does not carry `uv`. Install uv from upstream PyPI
+# (one-shot --index-url) and let everything downstream stay as the base
+# image configured it.
+#
+# KNOWN ISSUE (INFR-91): leaving uv on its default index means uv resolves
+# sglang[all]'s torch dep to the upstream CPU wheel, clobbering the
+# dustynv base image's CUDA torch. The image therefore builds and SGLang
+# imports, but reports `cuda False` on a Tegra GPU. Pointing uv at the
+# JetPack mirror doesn't fix it cleanly either — that mirror returns
+# internal `http://alice:3141/...` URLs for some packages which fail DNS
+# from the GitHub-hosted runner. Real fix likely involves either (a) a
+# different torch-wheel source (NVIDIA's developer.download redist), or
+# (b) switching base image to dustynv/sglang. Tracked separately.
 RUN mkdir -p ${PIP_WHEEL_DIR} && \
     pip install --no-cache-dir --index-url https://pypi.org/simple uv
-
-ENV UV_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu128 \
-    UV_EXTRA_INDEX_URL=https://pypi.org/simple \
-    UV_INDEX_STRATEGY=unsafe-best-match
 
 # Vendored SGLang install (pip-first; falls back to source build on failure).
 COPY build.sh install.sh $TMP/
