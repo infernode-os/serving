@@ -9,20 +9,16 @@
 # untested-upstream regressions before they reach a deploy — the kind of
 # breakage that previously slipped past the import-only checks.
 #
-# Usage (on Hephaestus dev daemon, with an HF cache mount):
-#   docker --host unix:///run/docker-dev.sock run --rm \
-#     --runtime nvidia --gpus all \
-#     -v /mnt/orin-ssd/huggingface:/root/.cache/huggingface \
+# Usage:
+#   HF_CACHE="${HF_CACHE:-/var/lib/huggingface}"
+#   docker run --rm --runtime nvidia --gpus all \
+#     -v "$HF_CACHE":/root/.cache/huggingface \
 #     -e HF_HOME=/root/.cache/huggingface \
 #     ghcr.io/infernode-os/serving-sglang:orin-latest \
 #     /opt/sglang/validate-on-hardware.sh
 #
-# Usage (field-deployment Orin AGX, single docker daemon):
-#   docker run --rm --runtime nvidia --gpus all \
-#     -v /var/lib/huggingface:/root/.cache/huggingface \
-#     -e HF_HOME=/root/.cache/huggingface \
-#     ghcr.io/infernode-os/serving-sglang:orin-latest \
-#     /opt/sglang/validate-on-hardware.sh
+# If your build/test host runs a non-default Docker daemon, prepend
+# `--host unix:///run/<daemon>.sock` to the docker invocation.
 #
 # The HF mount is recommended (re-uses ~2 GB TinyLlama between runs). If
 # absent, the smoke will pull TinyLlama fresh into the container each time.
@@ -97,7 +93,7 @@ step "7. Serving smoke (TinyLlama → /v1/chat/completions, KV-cache verified)"
 # HTTP path. Verifies: server starts, KV cache is allocated, /health 200s,
 # /v1/chat/completions returns a sensible completion.
 #
-# Flags mirror runbooks/hephaestus-deploy.md §3 — keeps the smoke aligned
+# Flags mirror runbooks/deploy.md §3 — keeps the smoke aligned
 # with the documented production launch shape.
 
 rm -f "$SMOKE_LOG"

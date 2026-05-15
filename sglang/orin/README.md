@@ -42,16 +42,16 @@ That's the whole delta. The base image is otherwise untouched.
 
 CI builds on `ubuntu-24.04-arm` (Graviton SBSA, native aarch64 — no QEMU). See `.github/workflows/build-sglang.yml`. The Dockerfile carries three build-time guards that fail the build if torch loses CUDA, if Triton or SGLang fail to import, or if the SGLang version pin drifts.
 
-## Build (manual on Hephaestus)
+## Build (manual, any aarch64 host)
 
 ```sh
 cd ~/serving/sglang/orin
-docker --host unix:///run/docker-dev.sock build \
+docker build \
   --build-arg BASE_IMAGE=dustynv/sglang:r36.4.0 \
   -t serving-sglang:orin-local .
 ```
 
-(Hephaestus-specific: use the dev daemon socket via `--host` per the dual-daemon policy in `runbooks/hephaestus-deploy.md` §0.1. On a field-deployment Orin AGX, drop the `--host` flag.)
+If your build host runs a dedicated experimental Docker daemon on a non-default socket, prepend `--host unix:///run/<daemon>.sock` — that's a per-environment concern, not part of the build.
 
 ## Files
 
@@ -69,18 +69,18 @@ The "unused" files are retained for now under MIT attribution (`../LICENSE-UPSTR
 
 ## What this does NOT include
 
-- **Entrypoint scripts.** Launch arguments live with the runbook (`runbooks/hephaestus-deploy.md`) rather than baked into the image, so the same image serves different model paths without rebuild.
+- **Entrypoint scripts.** Launch arguments live with the runbook (`runbooks/deploy.md`) rather than baked into the image, so the same image serves different model paths without rebuild.
 
 ## Verifying a build (on hardware)
 
 The validator runs all seven checks including a real serving smoke (launches `sglang.launch_server` with TinyLlama, asserts `/health`, asserts the `KV Cache is allocated` startup line, exercises `/v1/chat/completions`):
 
 ```sh
-# On Hephaestus dev daemon (mount the host HF cache so TinyLlama isn't
-# redownloaded each run):
-docker --host unix:///run/docker-dev.sock run --rm \
+# Mount the host HF cache so TinyLlama isn't redownloaded each run:
+HF_CACHE="${HF_CACHE:-/var/lib/huggingface}"
+docker run --rm \
   --runtime nvidia --gpus all \
-  -v /mnt/orin-ssd/huggingface:/root/.cache/huggingface \
+  -v "$HF_CACHE":/root/.cache/huggingface \
   -e HF_HOME=/root/.cache/huggingface \
   ghcr.io/infernode-os/serving-sglang:orin-latest \
   /opt/sglang/validate-on-hardware.sh
@@ -100,7 +100,7 @@ On success the final line is `All on-hardware checks passed.`. Expected serving-
 `gpt-oss` arch verification — deferred to INFR-92, expected to fail on v1:
 
 ```sh
-docker --host unix:///run/docker-dev.sock run --rm --runtime nvidia --gpus all \
+docker run --rm --runtime nvidia --gpus all \
   ghcr.io/infernode-os/serving-sglang:orin-latest \
   python3 -c "import sglang.srt.models.gpt_oss" || echo "(expected for v1; INFR-92)"
 ```

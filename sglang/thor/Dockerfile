@@ -20,4 +20,4 @@ LABEL org.opencontainers.image.licenses="MIT"
 COPY test.py /opt/sglang/test.py
 
 # No CMD/ENTRYPOINT override — preserve NGC's defaults so callers
-# pass the launch args explicitly (see runbooks/hephaestus-deploy.md).
+# pass the launch args explicitly (see runbooks/deploy.md).

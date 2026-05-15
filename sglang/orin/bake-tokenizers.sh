@@ -7,7 +7,7 @@
 # (<|eot_id|>, <|begin_of_text|>, <|start_header_id|>) properly, so stops
 # don't match cleanly and chat-template framing is wrong. The fix is to
 # point --tokenizer-path at a real HuggingFace tokenizer dir at launch
-# time (see runbooks/hephaestus-deploy.md). Baking the tokenizers into
+# time (see runbooks/deploy.md). Baking the tokenizers into
 # the image means the launch command is fully offline-capable.
 #
 # Each family pulled is the tokenizer files only (~30 MB per family);

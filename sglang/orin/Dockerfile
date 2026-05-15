@@ -62,7 +62,7 @@ RUN DP=/usr/local/lib/python3.10/dist-packages \
 
 # Build-time guards: CI runners have no GPU, so this is metadata-only.
 # Real on-hardware verification lives in validate-on-hardware.sh and runs
-# post-pull on Hephaestus / a field Orin.
+# post-pull on the Jetson hardware.
 COPY validate-on-hardware.sh /opt/sglang/validate-on-hardware.sh
 COPY test.py /opt/sglang/test.py
 RUN chmod +x /opt/sglang/validate-on-hardware.sh \

@@ -4,11 +4,11 @@
 
 **Date:** 2026-05-13 (initial) — 2026-05-14 (working recipe + bake-off)
 **Owning ticket:** [INFR-68](https://nervsystems-team.atlassian.net/browse/INFR-68) — Spike: SGLang on Jetson Orin for LoRA-native multi-model serving
-**Status:** **Measured + working recipe documented.** SGLang server runs on Hephaestus; bake-off complete (SGLang scales ~3× under concurrent load vs Ollama). Productization tracked under the "Productize SGLang serving" epic in INFR.
+**Status:** **Measured + working recipe documented.** SGLang server runs on a Jetson Orin AGX dev box; bake-off complete (SGLang scales ~3× under concurrent load vs Ollama). Productization tracked under the "Productize SGLang serving" epic in INFR.
 
 This document captures what would have to change in IOL's training and
 deployment pipelines if InferNode swaps (or doubles up) Ollama with
-SGLang as the Hephaestus inference backend. It is **deliberately
+SGLang as the on-device inference backend. It is **deliberately
 written before any experiment**, so the first reality-check round of
 the spike will probably contradict some of it. Treat as a working
 hypothesis, not a recipe.
@@ -30,7 +30,7 @@ Current pipeline (per `docs/V3-DEPLOY-RUNBOOK.md`):
 PEFT LoRA checkpoint
   → merge_to_gguf.py (merge + convert + Q4_K_M quantize)
   → GGUF + Modelfile
-  → rsync to Hephaestus
+  → rsync to deploy host
   → ollama create -f Modelfile
   → /v1/chat/completions
 ```
@@ -39,7 +39,7 @@ With SGLang the destination accepts the PEFT checkpoint **directly**:
 
 ```
 PEFT LoRA checkpoint
-  → rsync to Hephaestus (just the adapter dir; tens of MB, not 13 GB)
+  → rsync to the deploy host (just the adapter dir; tens of MB, not 13 GB)
   → sglang.launch_server --model-path <base> --lora-paths <adapter>
   → /v1/chat/completions
 ```
@@ -167,7 +167,7 @@ to change there. The post-training step in the deploy runbook
 If we keep both stacks, this becomes a Make target fan-out:
 
 - `make deploy-ollama` — existing GGUF pipeline (current)
-- `make deploy-sglang` — rsync adapter dir to Hephaestus + restart SGLang
+- `make deploy-sglang` — rsync adapter dir to the deploy host + restart SGLang
 
 No new Make scripts to author per the project's existing
 "describe inline, don't wrap" preference; this is one rsync.
@@ -220,7 +220,7 @@ SGLang's `/v1/chat/completions` is OpenAI-compatible, so the eval is
 literally:
 
 ```sh
-make eval-baseline MODEL=devstral-limbo-v3 BASE_URL=http://hephaestus.lan:30000/v1
+make eval-baseline MODEL=devstral-limbo-v3 BASE_URL=http://<deploy-host>:30000/v1
 ```
 
 `tools/virgil-agent/scenarios/*.yaml` should also work as-is.
@@ -228,8 +228,8 @@ make eval-baseline MODEL=devstral-limbo-v3 BASE_URL=http://hephaestus.lan:30000/
 Bake-off harness for the spike:
 
 ```sh
-make eval-baseline MODEL=devstral-limbo-v3 BASE_URL=http://hephaestus.lan:11434/v1  # Ollama
-make eval-baseline MODEL=devstral-limbo-v3 BASE_URL=http://hephaestus.lan:30000/v1  # SGLang
+make eval-baseline MODEL=devstral-limbo-v3 BASE_URL=http://<deploy-host>:11434/v1  # Ollama
+make eval-baseline MODEL=devstral-limbo-v3 BASE_URL=http://<deploy-host>:30000/v1  # SGLang
 make eval-grounding INPUT=eval/runs/<ollama>.gated.jsonl
 make eval-grounding INPUT=eval/runs/<sglang>.gated.jsonl
 ```
@@ -276,13 +276,13 @@ real numbers.
 ## What this does not address
 
 - **Cost of running two stacks.** If both Ollama and SGLang stay
-  resident on Hephaestus we lose the multi-LoRA memory win. Either
+  resident on the deploy host we lose the multi-LoRA memory win. Either
   pick one or split Veltro's two production roles across them (which
   the V4-PLAN routing already implies).
 - **Veltro Limbo-authoring path.** Compile-gate is unchanged; this
   is a serve-time discussion.
 - **Build/CI.** None of this touches the IOL CI surface. The compile
-  gate keeps running on Docker x86; the spike happens on Hephaestus.
+  gate keeps running on Docker x86; the spike happens on the Jetson dev box.
 - **Veltro security / namespace model.** Untouched.
 
 ---
@@ -290,7 +290,7 @@ real numbers.
 ## TL;DR for the spike runner
 
 1. Validate AWQ-INT4 quantization runs on `sm_87` with whatever JetPack
-   PyTorch/Triton combo Hephaestus is on **first**. Stop if it doesn't.
+   PyTorch/Triton combo the dev box is on **first**. Stop if it doesn't.
 2. Validate SGLang loads the existing gpt-oss-limbo-v3 PEFT adapter
    on its MoE base **second**. If it doesn't, decide between repack /
    retrain-attn-only / merge-and-quantize before continuing.
@@ -302,7 +302,7 @@ real numbers.
 
 ## Spike attempt — 2026-05-13/14 (measured)
 
-First real attempt on Hephaestus. Result: **parked at the PyTorch
+First real attempt on the Jetson dev box. Result: **parked at the PyTorch
 layer; no prebuilt wheel exists that satisfies all of SGLang's runtime
 requirements on Jetson Orin AGX (`sm_87`).** This is a genuine
 spike-finding — not in the pre-spike risk list above — so promoted to
@@ -310,17 +310,17 @@ its own section.
 
 ### What worked
 
-- Hephaestus baseline: JetPack 6.2 (L4T R36.4.7) / CUDA 12.6 / cuDNN
-  9.3.0 / Orin `sm_87` / 64 GB unified memory / 916 GB orin-ssd.
-- Disk reclamation on orin-ssd: ~129 GB freed (HF xet cache, conda pkg
+- Dev-box baseline: JetPack 6.2 (L4T R36.4.7) / CUDA 12.6 / cuDNN
+  9.3.0 / Orin `sm_87` / 64 GB unified memory / 916 GB working SSD.
+- Disk reclamation on the working SSD: ~129 GB freed (HF xet cache, conda pkg
   cache, two F5-TTS conda envs, three unused HF model caches) without
   touching anything load-bearing (Devstral, gpt-oss-20b, all daedalus
-  artifacts, NERVA TAK models, swapfile, IOL repo). orin-ssd 97% → 82%.
-- Conda env at `/mnt/orin-ssd/pdfinn/conda-envs/sglang-spike`
+  artifacts, other resident workloads, swapfile, IOL repo). 97% → 82%.
+- Conda env at `${WORK}/conda-envs/sglang-spike`
   (Python 3.10.20). cuDNN-9-aligned PyTorch installed and verified
   (NVIDIA's `torch-2.5.0a0+nv24.08`, then upstream `torch-2.6.0+cu126`).
 - **`daedalus-v1` structural validation**: the v4 Devstral PEFT
-  adapter at `/mnt/orin-ssd/pdfinn/daedalus-v1/checkpoint-stripped/`
+  adapter at `${WORK}/daedalus-v1/checkpoint-stripped/`
   is canonical-shape — peft 0.18.1 LoRA, r=32, α=64, all 7 target
   modules (q/k/v/o + gate/up/down), 560 tensors covering all 40 layers,
   184.8M trainable params. **Would load into SGLang's LoRA adapter
@@ -351,7 +351,7 @@ Available prebuilt PyTorch wheels on aarch64+CUDA:
 
 In other words: SGLang on Jetson Orin AGX requires a custom PyTorch
 source build with **both** `USE_DISTRIBUTED=1` **and**
-`TORCH_CUDA_ARCH_LIST=8.7`. The existing `/mnt/orin-ssd/pytorch-build/`
+`TORCH_CUDA_ARCH_LIST=8.7`. The existing `${WORK}/pytorch-build/`
 (7.1 GB, cp311 + torch 2.1.0a0) appears to be an earlier attempt at
 this same exercise.
 
@@ -394,7 +394,7 @@ apply:
 ### What this means for INFR-68
 
 The spike's preregistered goal "does SGLang serve a model on
-Hephaestus" got refined into "does SGLang's `import` chain pass on a
+Jetson Orin" got refined into "does SGLang's `import` chain pass on a
 working CUDA-on-`sm_87` PyTorch". Answer: not with anything off the
 shelf today. Reopen criterion sharpens to:
 
@@ -406,7 +406,7 @@ system library. Once that wheel exists, the remaining install steps
 in §"Required workarounds" above carry the runtime to `import sglang`
 in well under an hour.
 
-The existing `/mnt/orin-ssd/pytorch-build/` is the historical seed for
+The existing `${WORK}/pytorch-build/` is the historical seed for
 this work — keep it (the user wisely declined to purge during the
 spike). A clean restart would target cp310 + torch 2.6 + cu126
 + sm_87.
@@ -423,9 +423,9 @@ spike). A clean restart would target cp310 + torch 2.6 + cu126
 - `daedalus-v1` itself. We confirmed the artifact is well-formed; it
   will deploy on anything that loads a PEFT adapter.
 
-### Environment artifacts on Hephaestus (preserved)
+### Environment artifacts (preserved on the dev box)
 
-- Conda env: `/mnt/orin-ssd/pdfinn/conda-envs/sglang-spike` — SGLang
+- Conda env: `${WORK}/conda-envs/sglang-spike` — SGLang
   stack installed minus the PyTorch issue. Reusable for the next
   attempt by just `pip install --force-reinstall` a working torch.
 - Patched files (vs upstream sglang 0.5.11 wheel):
@@ -439,7 +439,7 @@ spike). A clean restart would target cp310 + torch 2.6 + cu126
 
 ## Spike attempt 2 — 2026-05-14 (working)
 
-**Result: SGLang is live on Hephaestus**, serving an OpenAI-compatible
+**Result: SGLang is live on the Jetson Orin dev box**, serving an OpenAI-compatible
 `/v1/chat/completions` endpoint on port 30000 with TinyLlama-1.1B as
 the smoke target. End-to-end inference proven: `"2+2=" →
 "The answer to the question is 4"` in 8 tokens.
@@ -462,49 +462,51 @@ dustynv/sglang:r36.4.0     7.8 GB (Ubuntu 22.04 / Python 3.10 / CUDA 12.6 / sm_8
 ```
 
 Important: the **`-24.04` variants of the dustynv images use Python
-3.12**, which does *not* match Hephaestus's host Python 3.10. Use the
+3.12**, which does *not* match the dev box's host Python 3.10. Use the
 plain `r36.4.0` tag (Ubuntu 22.04) to align with the host.
 
-### Honouring the Hephaestus disk policy
+### Daemonless extraction (why)
 
-Per `[[hephaestus-disk-policy]]`: root partition emulates a
-production single-disk node (OS + TAK/NERVA via Docker + Ollama).
-`/mnt/orin-ssd` is the dev indulgence. So **we do NOT relocate
-Docker's containerd storage** — that would migrate TAK/NERVA images
-off the production-emulating disk. Instead, we extract the dustynv
-container as files onto orin-ssd, never invoking Docker's daemon.
+We extract the dustynv container as files onto the working SSD via
+`crane`, never invoking Docker's daemon. This keeps the container
+artifacts off whatever disk the host's Docker daemon stores images
+on, which matters when the dev box's root partition is intentionally
+constrained for unrelated reasons.
 
 ### The recipe (reproducible)
 
+`${WORK}` below is whatever working directory you keep this stack
+under (e.g. a fast local SSD with ample free space).
+
 ```sh
 # 1. crane (daemonless OCI puller, single static binary)
-mkdir -p /mnt/orin-ssd/pdfinn/bin /mnt/orin-ssd/pdfinn/scratch
-cd /mnt/orin-ssd/pdfinn/scratch
+mkdir -p ${WORK}/bin ${WORK}/scratch
+cd ${WORK}/scratch
 LATEST=$(curl -sS "https://api.github.com/repos/google/go-containerregistry/releases/latest" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
 curl -sSL -o crane.tar.gz \
   "https://github.com/google/go-containerregistry/releases/download/${LATEST}/go-containerregistry_Linux_arm64.tar.gz"
-tar -xzf crane.tar.gz -C /mnt/orin-ssd/pdfinn/bin crane
-chmod +x /mnt/orin-ssd/pdfinn/bin/crane
+tar -xzf crane.tar.gz -C ${WORK}/bin crane
+chmod +x ${WORK}/bin/crane
 
 # 2. Pull the Jetson SGLang container as an OCI layout (no Docker daemon)
-/mnt/orin-ssd/pdfinn/bin/crane pull --format=oci \
+${WORK}/bin/crane pull --format=oci \
   dustynv/sglang:r36.4.0 \
-  /mnt/orin-ssd/pdfinn/scratch/sglang-r36.4.0-oci
+  ${WORK}/scratch/sglang-r36.4.0-oci
 
-# 3. Extract all layers in manifest order to a merged rootfs on orin-ssd
-cd /mnt/orin-ssd/pdfinn/scratch/sglang-r36.4.0-oci
+# 3. Extract all layers in manifest order to a merged rootfs on the working SSD
+cd ${WORK}/scratch/sglang-r36.4.0-oci
 MANIFEST=$(python3 -c "import json; print(json.load(open('index.json'))['manifests'][0]['digest'].split(':',1)[1])")
-mkdir -p /mnt/orin-ssd/pdfinn/scratch/sglang-rootfs
+mkdir -p ${WORK}/scratch/sglang-rootfs
 python3 -c "import json; m=json.load(open('blobs/sha256/$MANIFEST')); \
   [print(l['digest'].split(':',1)[1]) for l in m['layers']]" | \
   while read d; do
     tar --no-same-owner --warning=no-unknown-keyword -xzf "blobs/sha256/$d" \
-      -C /mnt/orin-ssd/pdfinn/scratch/sglang-rootfs 2>/dev/null || true
+      -C ${WORK}/scratch/sglang-rootfs 2>/dev/null || true
   done
 
 # 4. Remove the stdlib-shadowing dataclasses backport (Python-2-era cruft)
-DP=/mnt/orin-ssd/pdfinn/scratch/sglang-rootfs/usr/local/lib/python3.10/dist-packages
+DP=${WORK}/scratch/sglang-rootfs/usr/local/lib/python3.10/dist-packages
 mkdir -p $DP/_disabled_backports
 mv $DP/dataclasses.py $DP/_disabled_backports/
 mv $DP/__pycache__/dataclasses.* $DP/_disabled_backports/ 2>/dev/null || true
@@ -517,7 +519,7 @@ so the host PYTHONPATH must include both the dist-packages and the
 extracted source tree:
 
 ```sh
-ROOTFS=/mnt/orin-ssd/pdfinn/scratch/sglang-rootfs
+ROOTFS=${WORK}/scratch/sglang-rootfs
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=$ROOTFS/workspace/sglang/python:$ROOTFS/usr/local/lib/python3.10/dist-packages
 # Critical: Tegra driver shim FIRST in LD_LIBRARY_PATH, else "CUDA unknown error"
@@ -526,7 +528,7 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda-12.6/lib
 # torch._inductor at import. We don't need compile for serving.
 export TORCHDYNAMO_DISABLE=1
 export TORCH_COMPILE_DISABLE=1
-export HF_HOME=/mnt/orin-ssd/huggingface
+export HF_HOME=${WORK}/huggingface
 ```
 
 ### Launch command (working)
@@ -592,17 +594,17 @@ This shifts the **immediate next achievable target** from "gpt-oss
 LoRA unblock" to "Devstral + daedalus-v1 LoRA bake-off" — which is
 served by 0.4.1.post7's AWQ/GPTQ/bf16 paths without issue.
 
-### Environment artifacts on Hephaestus (preserved)
+### Environment artifacts (preserved on the dev box)
 
-- `/mnt/orin-ssd/pdfinn/scratch/sglang-rootfs/` — extracted container
+- `${WORK}/scratch/sglang-rootfs/` — extracted container
   rootfs (18 GB). The "installation." **Keep.**
-- `/mnt/orin-ssd/pdfinn/bin/crane` — daemonless OCI puller, kept for
+- `${WORK}/bin/crane` — daemonless OCI puller, kept for
   future container extractions on this Jetson. **Keep.**
-- `/mnt/orin-ssd/pdfinn/scratch/sglang-logs/` — proof-of-life and
+- `${WORK}/scratch/sglang-logs/` — proof-of-life and
   bake-off run logs. Small. **Keep.**
-- `/mnt/orin-ssd/pdfinn/scratch/sglang-r36.4.0-oci/` — original OCI
+- `${WORK}/scratch/sglang-r36.4.0-oci/` — original OCI
   layout (7.3 GB). **Removed** after `sglang-rootfs/` verified working.
-- `/mnt/orin-ssd/pdfinn/conda-envs/sglang-spike/` — attempt-1 env that
+- `${WORK}/conda-envs/sglang-spike/` — attempt-1 env that
   didn't lead anywhere. **Removed.**
 
 ---
@@ -613,9 +615,9 @@ served by 0.4.1.post7's AWQ/GPTQ/bf16 paths without issue.
 throughput under concurrent load. At single-request latency they are
 roughly tied (Ollama slightly faster).**
 
-Both stacks ran simultaneously on Hephaestus, serving the **same**
+Both stacks ran simultaneously on the dev box, serving the **same**
 Llama-3.1-8B Q4_K_M GGUF blob (Ollama's own model store, path
-`/mnt/orin-ssd/ollama/models/blobs/sha256-667b0c1932…`). SGLang loaded
+`<ollama-models>/blobs/sha256-667b0c1932…`). SGLang loaded
 the blob via `--load-format gguf --quantization gguf`. Total resident
 memory across both servers ≈ 18 GiB on the 64 GiB unified Jetson —
 they coexist comfortably.
@@ -645,7 +647,7 @@ curl -sS -X POST http://127.0.0.1:11434/api/generate \
        "stream":false,"keep_alive":"30m"}'
 
 # Launch SGLang against the SAME GGUF blob
-BLOB=/mnt/orin-ssd/ollama/models/blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29
+BLOB=<ollama-models>/blobs/sha256-667b0c1932bc6ffc593ed1d03f895bf2dc8dc6df21db3042284a6f4416b06a29
 # (env vars per Operations section above)
 python3 -m sglang.launch_server \
   --model-path "$BLOB" \
@@ -791,6 +793,6 @@ After the run:
 - SGLang server: stopped (`kill -TERM` via port-30000 ownership).
 - Ollama: `keep_alive=0` POST dropped Llama-3.1-8B; daemon left up,
   no models loaded.
-- Extracted SGLang rootfs at `/mnt/orin-ssd/pdfinn/scratch/sglang-rootfs/`
+- Extracted SGLang rootfs at `${WORK}/scratch/sglang-rootfs/`
   preserved for the next session — just relaunch per the Operations
   section above.

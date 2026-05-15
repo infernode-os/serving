@@ -31,7 +31,7 @@ dispatch).
 
 ## Routing table
 
-The canonical route table for v1 (Hephaestus, Veltro-on-SGLang). All
+The canonical route table for v1 (single-host, Veltro-on-SGLang). All
 URLs are relative to the configured backend prefix; `model` is the
 model selector accepted by both backends' `/v1/chat/completions`.
 
@@ -52,7 +52,7 @@ fall back to Ollama — the dev path stays unchanged.
 
 ## Config schema
 
-Stored at `/etc/lucibridge/routing.json` on Hephaestus, owned by
+Stored at `/etc/lucibridge/routing.json` on the deploy host, owned by
 `root:root`, mode `0644` (no secrets):
 
 ```json
@@ -107,7 +107,7 @@ routes every request to it. v0 deployments don't need to change.
 ## env-var bridging from `serve-llm.sh`
 
 The serve-llm launcher exports the env vars that the bridge resolves
-into the implicit / explicit config. For Hephaestus dual-backend mode:
+into the implicit / explicit config. For dual-backend mode:
 
 ```sh
 # /etc/serve-llm.env  (sourced by serve-llm.service)
@@ -120,7 +120,7 @@ LUCIBRIDGE_ROUTING_CONFIG=/etc/lucibridge/routing.json
 The bridge uses `LUCIBRIDGE_ROUTING_CONFIG` if set, falling back to
 the implicit single-backend mode (using `LLM_BACKEND_DEFAULT`) when
 the file is absent. This matches the §8 mode-switching pattern in
-`runbooks/hephaestus-deploy.md`.
+`runbooks/deploy.md`.
 
 ---
 
@@ -178,7 +178,7 @@ fixture file and the new test functions.
 
 | Criterion | Where verified |
 |---|---|
-| A configured Veltro session routes `limbo_authoring` to Ollama and `tool_call` to SGLang, both succeed | `infernode-os/infernode` agentlib_test suite + manual run on Hephaestus |
+| A configured Veltro session routes `limbo_authoring` to Ollama and `tool_call` to SGLang, both succeed | `infernode-os/infernode` agentlib_test suite + manual run on the deploy host |
 | Fallback documented and tested | tests 3 + 4 above |
 | Existing single-URL configs still work unchanged | test 1 above |
 | No regression in existing `lucibridge_test` suite | CI run on `infernode-os/infernode` |
@@ -194,6 +194,6 @@ fixture file and the new test functions.
   multi-LoRA validation.
 * **Bridge config hot-reload** — v1 reloads on `SIGHUP`; document
   exact behaviour once the agentlib PR lands.
-* **Cross-host routing** — current schema assumes Hephaestus-local
+* **Cross-host routing** — current schema assumes single-host local
   backends. If we add a second Jetson, `backends[].base_url` already
   takes any URL; document the firewall/zerotier story before exposing.

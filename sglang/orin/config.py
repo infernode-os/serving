@@ -14,7 +14,7 @@ Pin rationale (INFR-74 + INFR-77):
     (Aug 2025) and has no srt/models/gpt_oss.py.
   - 0.5.3 is the initial pick: first 0.5.x line with gpt-oss model
     class, predates the upstream's CUDA-13 transition (which landed
-    around 0.5.11). On-target smoke build on Hephaestus is the gate.
+    around 0.5.11). On-target smoke build on Jetson hardware is the gate.
   - Fallback ladder if 0.5.3 doesn't build: 0.5.2 → 0.5.1 → 0.5.0,
     then 0.4.5+. Document the working pin back here when verified.
 """
