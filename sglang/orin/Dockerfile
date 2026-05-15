@@ -41,6 +41,41 @@ RUN sed -i \
  && grep -q 'exist_ok=True' \
         ${VENV}/lib/python3.12/site-packages/vllm/transformers_utils/configs/ovis.py
 
+# dustynv's sglang 0.4.9 ships a SyntaxError in srt/utils.py: an orphan
+# `except FileNotFoundError:` block left behind by a refactor of
+# `get_nvgpu_memory_capacity()`. Both code paths (Jetson + non-Jetson)
+# already handle exceptions inside their own try-blocks, so the orphan
+# is plain dead syntax. dustynv apparently didn't `python -m sglang.launch_server`
+# before publishing the image. Strip the four orphan lines with a Python
+# patch (sed across multi-line block is fragile). Idempotent.
+RUN ${VENV}/bin/python3 - <<'PY'
+import re, pathlib
+p = pathlib.Path('/opt/venv/lib/python3.12/site-packages/sglang/srt/utils.py')
+src = p.read_text()
+# The orphan block sits after the inner try-except for the non-Jetson path
+# closes (two excepts, both at 8-space indent), then there's blank lines,
+# then the orphan `except` at 4-space indent. Match exactly that block.
+pattern = re.compile(
+    r'(\n\n)    except FileNotFoundError:\n'
+    r'        raise RuntimeError\(\n'
+    r'            "nvidia-smi not found\. Ensure NVIDIA drivers are installed and accessible\."\n'
+    r'        \)\n',
+    re.MULTILINE,
+)
+new, n = pattern.subn(r'\1', src)
+if n == 0:
+    # Either already patched, or upstream changed; be loud either way.
+    if 'nvidia-smi not found. Ensure NVIDIA drivers are installed and accessible.' in src:
+        raise SystemExit('FAIL: orphan-except patch did not match but error string still present')
+    print('orphan-except patch: nothing to do (already clean)')
+else:
+    p.write_text(new)
+    print(f'orphan-except patch: removed {n} block(s)')
+import ast
+ast.parse(new)  # syntactic validation
+print('utils.py: parses cleanly')
+PY
+
 # Build-time guards: GPU-less CI runners limit us to metadata checks.
 # Anything that transitively imports sgl_kernel runs `_load_architecture_specific_ops()`
 # which probes for a CUDA device — fails import on the runner even when

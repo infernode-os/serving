@@ -13,14 +13,24 @@ Container recipe for SGLang on Jetson Orin AGX. Built as a **delta upgrade** on 
 | Python (container) | 3.12 |
 | PyTorch | 2.8.0+cu129 (sm_87, from dustynv base) |
 | Triton | 3.4.0 |
-| SGLang | 0.5.4 (delta upgrade from base's 0.4.9) |
-| sgl-kernel | 0.3.16.post3 |
+| SGLang | **0.4.9** (dustynv-bundled; v1 baseline — see "Pinned versions" below) |
+| sgl-kernel | 0.2.3 (dustynv-built for sm_87) |
 
-## Pinned versions
+## Pinned versions — v1 ships with dustynv's bundled SGLang 0.4.9
 
-`SGLANG_VERSION=0.5.4` + `SGL_KERNEL_VERSION=0.3.16.post3`. The pin is constrained by torch availability: every SGLang 0.5.x strictly pins `torch==2.8.0`, and the only place torch 2.8 + cu128/9 + sm_87 + cp312 exists as a working wheel is **inside dustynv's `r36.4-cu129-24.04` image**. The 0.5.4 sgl-kernel post-3 is the version that ships with sglang 0.5.4. INFR-77 acceptance gate (`gpt_oss.py` present) is met at 0.5.x.
+This is a deliberate hold-back from SGLang 0.5.x. The constraint chain (full investigation in [INFR-91] + [INFR-92]):
 
-If a newer SGLang is desired, the constraint chain to verify is: (1) a dustynv tag exists with the required torch for that SGLang; (2) the sgl-kernel pin for that SGLang has a wheel for the base's torch + cu + cp.
+* SGLang 0.5.x strictly pins `sgl-kernel==0.3.16.post3`.
+* `sgl-kernel 0.3.16.post3`'s PyPI aarch64 wheel ships **only sm_90 (Hopper) and sm_100 (Blackwell) binaries** — no sm_87 (Orin). Cross-arch `.so` loading succeeds at import time, but the first kernel call hits `RuntimeError: no kernel image is available for execution on the device`.
+* Building sgl-kernel 0.3.16.post3 from source for sm_87 is blocked by an upstream broken deepgemm commit SHA in sgl-kernel's CMake `FetchContent` declaration.
+* Workarounds (mixing dustynv 0.2.3 sm_87 binaries with sglang 0.5.x, `SGLANG_ENABLE_DETERMINISTIC_INFERENCE=1`) all hit either API gaps or dispatch machinery that ignores the override.
+
+So v1 ships dustynv's bundled SGLang 0.4.9 which uses sgl-kernel 0.2.3 (built for sm_87 by dustynv). The server actually starts and serves requests. Trade-off: **no `gpt_oss.py` model arch in 0.4.x**, so lucibridge's gpt-oss routing falls back to Ollama on Orin. The fallback was designed for exactly this case (per `runbooks/lucibridge-routing.md`); production is degraded but not broken.
+
+Tracking the upgrade to 0.5.x + gpt_oss support: [INFR-92].
+
+[INFR-91]: https://nervsystems-team.atlassian.net/browse/INFR-91
+[INFR-92]: https://nervsystems-team.atlassian.net/browse/INFR-92
 
 ## Base image rationale
 
@@ -42,8 +52,6 @@ CI builds on `ubuntu-24.04-arm` (Graviton SBSA, native aarch64 — no QEMU). See
 cd ~/serving/sglang/orin
 docker --host unix:///run/docker-dev.sock build \
   --build-arg BASE_IMAGE=dustynv/sglang:r36.4-cu129-24.04 \
-  --build-arg SGLANG_VERSION=0.5.4 \
-  --build-arg SGL_KERNEL_VERSION=0.3.16.post3 \
   -t serving-sglang:orin-local .
 ```
 
@@ -79,18 +87,20 @@ Expected:
 ```
 testing SGLang...
 ✅ Memory cleared
-SGLang version: 0.5.4
+SGLang version: 0.4.9
 CUDA available: True
 CUDA device: Orin
 SGLang OK
 ```
 
-`gpt-oss` arch verification (INFR-77 acceptance):
+`gpt-oss` arch verification (deferred to INFR-92 — v1 ships SGLang 0.4.9 without gpt_oss.py):
 
 ```sh
+# Currently EXPECTS to fail — gpt_oss.py is in SGLang 0.5+ and v1 ships 0.4.9.
+# Tracked: INFR-92.
 docker --host unix:///run/docker-dev.sock run --rm --gpus all --runtime nvidia \
   ghcr.io/infernode-os/serving-sglang:orin-latest \
-  python3 -c "import sglang.srt.models.gpt_oss as m; print('gpt_oss arch module:', m.__file__)"
+  python3 -c "import sglang.srt.models.gpt_oss" || echo "(expected for v1; INFR-92)"
 ```
 
 End-to-end launch:
