@@ -339,73 +339,44 @@ curl -fsS "$BASE/v1/chat/completions" -H 'content-type: application/json' -d '{
 
 ---
 
-## 5. systemd unit (production)
+## 5. systemd unit (user-scope)
 
-For a deploy that survives reboot, drop the unit below in
-`/etc/systemd/system/serving-sglang.service`. Mirrors the pattern in
-IOL's `docs/HEADLESS-LLM-DAEMON.md` for `serve-llm.service`.
+The unit is **user-scope** — runs under the user's `systemctl --user` manager alongside `ollama.service` and `infernode-llm.service`. No `/etc/`, no sudo, no polkit. Canonical artifacts live in `systemd/orin/` in this repo (see `systemd/orin/README.md`).
 
-```ini
-[Unit]
-Description=InferNode SGLang serving (Jetson Orin)
-After=docker.service ollama.service network-online.target
-Wants=docker.service network-online.target
-
-[Service]
-Type=exec
-Restart=on-failure
-RestartSec=10
-TimeoutStopSec=60
-
-# Resolved env file holds IMAGE pin, model path, port, etc.
-EnvironmentFile=/etc/serving-sglang.env
-
-ExecStartPre=-/usr/bin/docker stop serving-sglang
-ExecStartPre=-/usr/bin/docker rm   serving-sglang
-
-ExecStart=/usr/bin/docker run --name serving-sglang --rm \
-  --runtime nvidia --gpus all \
-  --network host --shm-size 8g \
-  -v ${HF_CACHE}:/root/.cache/huggingface \
-  -e HF_HOME=/root/.cache/huggingface \
-  ${IMAGE} \
-  python3 -m sglang.launch_server \
-    --model-path ${MODEL_PATH} \
-    --tokenizer-path ${TOKENIZER_PATH} \
-    --host 127.0.0.1 --port ${PORT} \
-    --attention-backend triton \
-    --mem-fraction-static ${MEM_FRACTION_STATIC} \
-    --disable-cuda-graph \
-    --log-level info
-
-ExecStop=/usr/bin/docker stop serving-sglang
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Companion `/etc/serving-sglang.env` (chmod 0644, no secrets). The v1 example below serves Llama-3.1-8B; once INFR-92 lands and an SGLang with `gpt_oss.py` ships, swap to `openai/gpt-oss-20b` (and drop `TOKENIZER_PATH` — gpt-oss is not Llama-family):
+Install:
 
 ```sh
-IMAGE=ghcr.io/infernode-os/serving-sglang:orin-<short-sha>
-MODEL_PATH=unsloth/Meta-Llama-3.1-8B-Instruct
-TOKENIZER_PATH=/opt/tokenizers/llama-3.1
-PORT=30000
-MEM_FRACTION_STATIC=0.5
-HF_CACHE=/mnt/orin-ssd/huggingface
+cd ~/github.com/infernode-os/serving        # or wherever you checked out
+mkdir -p ~/.config/systemd/user
+cp systemd/orin/serving-sglang.service     ~/.config/systemd/user/
+cp systemd/orin/serving-sglang.env.example ~/.config/systemd/user/serving-sglang.env
+
+# Pin IMAGE to a published :orin-<sha>; pick a model. The example ships
+# with TinyLlama as a smoke target — change MODEL_PATH (and uncomment
+# EXTRA_ARGS for Llama-3 family) for production.
+$EDITOR ~/.config/systemd/user/serving-sglang.env
+
+# One-time: enable lingering so the user manager survives logout on a
+# headless box. Verify first — Hephaestus has this enabled already.
+loginctl show-user "$USER" | grep -q 'Linger=yes' || sudo loginctl enable-linger "$USER"
+
+systemctl --user daemon-reload
 ```
 
-Activate:
+The unit is **not enabled by default** — bring it up via the InferNode `llmctl` switcher (in `infernode-os/infernode`) so only one local backend runs at a time. For a deploy that pre-dates `llmctl`, you can `systemctl --user enable --now serving-sglang.service`, but you are then responsible for stopping `ollama.service` before starting it.
+
+Run / stop:
 
 ```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now serving-sglang.service
-sudo systemctl status serving-sglang.service --no-pager
-journalctl -u serving-sglang.service -f
+systemctl --user start  serving-sglang.service
+systemctl --user stop   serving-sglang.service
+systemctl --user status serving-sglang.service --no-pager
+journalctl --user -u serving-sglang.service -f
 ```
 
-`After=ollama.service` lets Ollama come up first (port 11434), then
-SGLang on 30000. Both coexist on 64 GiB unified memory; see §6.
+The env file (`serving-sglang.env.example` → installed copy) controls everything tunable — image pin, model, port, `mem-fraction-static`, HF cache mount, extra launch flags. See `systemd/orin/README.md` for the field-by-field meanings and the Hephaestus-vs-field-deployment differences (notably `DOCKER_HOST=unix:///run/docker-dev.sock` for Hephaestus's dev daemon, default socket for a field Orin AGX).
+
+> **First-call latency** — flashinfer JIT compiles its kernels on the first `/v1/chat/completions` call (≈50–60s on Orin). Subsequent calls are sub-second. Build the JIT cache once after each start by issuing one warm-up call before any client traffic. Future work: mount a persistent JIT cache to skip the cold compile.
 
 ---
 
@@ -481,15 +452,19 @@ export LLM_BACKEND_SGLANG=http://127.0.0.1:30000/v1
 
 ### Switching modes
 
-```sh
-# Ollama-only
-sudo systemctl stop serving-sglang
-sudo systemctl mask serving-sglang   # prevent restart on reboot
+Once `llmctl` lands in `infernode-os/infernode`, the right way to switch is `llmctl set ollama` / `llmctl set sglang` — it stops one cleanly and starts the other, then updates `/lib/ndb/llm` accordingly. Until then, manual:
 
-# Re-enable SGLang
-sudo systemctl unmask serving-sglang
-sudo systemctl start serving-sglang
+```sh
+# Ollama-only — stop SGLang first, then start Ollama
+systemctl --user stop  serving-sglang.service
+systemctl --user start ollama.service
+
+# SGLang-only — opposite direction
+systemctl --user stop  ollama.service
+systemctl --user start serving-sglang.service
 ```
+
+Both units are user-scope; no sudo. They are intentionally not `Conflicts=` of each other in the unit files — `llmctl` (or you, manually) owns the stop-before-start ordering.
 
 ---
 
@@ -513,41 +488,45 @@ deployed config looks like and how to flip between modes.
 ## 10. Stopping cleanly
 
 ```sh
-# Graceful — gives SGLang ~30s to drain in-flight requests
-sudo systemctl stop serving-sglang
-# or, ad-hoc:
-docker stop serving-sglang
+# Graceful — gives SGLang up to 30s to drain in-flight requests
+# (ExecStop in the unit is `docker stop -t 30`).
+systemctl --user stop serving-sglang.service
 
-# If the daemon is stuck (>60s), escalate
-docker kill --signal=KILL serving-sglang
+# Ad-hoc (skips the unit, useful if systemd is unhappy)
+docker --host unix:///run/docker-dev.sock stop -t 30 serving-sglang
+
+# If even that hangs (rare; usually means a streaming client is pinning
+# the connection), escalate
+docker --host unix:///run/docker-dev.sock kill --signal=KILL serving-sglang
 ```
 
-Expected drain time is sub-second when idle, up to ~30s under N≥16
-concurrent. If `docker stop` takes longer than 60s, it usually means
-a downstream client is holding a streaming request open; the bridge
-should be killed first (`systemctl stop serve-llm`).
+Expected drain time is sub-second when idle, up to ~30s under N≥16 concurrent. If `docker stop` takes longer than 60s, it usually means a downstream client is holding a streaming request open; the bridge should be killed first (`systemctl --user stop infernode-llm.service`).
 
 ---
 
-## 11. Verifying end-to-end with `serve-llm` + lucibridge
+## 11. Verifying end-to-end with `infernode-llm` + lucibridge
+
+Single-backend (v1 default — `llmctl` not yet implemented):
 
 ```sh
-# Bring everything up
-sudo systemctl start ollama serving-sglang serve-llm
-sleep 5
+# Pick a backend; stop the other.
+systemctl --user stop ollama.service
+systemctl --user start serving-sglang.service
+sleep 60                                       # JIT warm-up, model load
+curl -sf http://127.0.0.1:30000/v1/models      # confirm SGLang up
 
-# Healthcheck the bridge endpoint
-curl -fsS http://127.0.0.1:8080/health    # serve-llm
-
-# Run a Veltro-shaped probe: a tool-call turn that routes to SGLang
-# (gpt-oss) and a Limbo-authoring turn that routes to Ollama (Devstral).
-# See runbooks/lucibridge-routing.md for the probe payload.
+# The infernode-llm 9P gateway already runs (user unit). It reads
+# /lib/ndb/llm inside emu for backend URL — make sure that points at
+# http://127.0.0.1:30000/v1 when SGLang is the active backend.
+systemctl --user status infernode-llm.service --no-pager | head -5
 ```
 
-A passing run looks like: SGLang's journal shows one `POST
-/v1/chat/completions` per dispatched tool call; Ollama's logs show one
-generate for the Limbo authoring turn; bridge logs show the routing
-decision for each.
+A passing run looks like: SGLang's journal shows one `POST /v1/chat/completions` per request from the bridge; the bridge's logs show the chosen URL and tokens flowing.
+
+When the lucibridge per-tool routing (INFR-79) and `llmctl` switcher land, this section becomes:
+- `llmctl set sglang` (or `ollama`, or pick a mix per tool category)
+- single Veltro-shaped probe that exercises both backends via the routing
+- journal evidence on each side
 
 ---
 

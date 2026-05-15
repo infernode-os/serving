@@ -1,0 +1,57 @@
+[Unit]
+Description=InferNode SGLang serving (Jetson Orin, dev daemon)
+Documentation=https://github.com/infernode-os/serving/blob/main/runbooks/hephaestus-deploy.md
+After=network-online.target
+Wants=network-online.target
+# Mutually exclusive with ollama.service at runtime — only one local LLM
+# backend is meant to be up at a time. The InferNode `llmctl` tool owns
+# stop-before-start ordering; we intentionally do NOT use Conflicts= here
+# so manual `systemctl --user start` of either doesn't kill the other
+# behind a user's back.
+
+[Service]
+Type=exec
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+# docker stop SIGKILLs the container if it doesn't drain in -t seconds;
+# the SIGKILL surfaces as exit 137. 137 (and 143 = SIGTERM) on a stop
+# path is not a failure for us — the service stopped because we asked it
+# to. Without this systemd marks clean stops as "failed".
+SuccessExitStatus=137 143
+
+EnvironmentFile=%h/.config/systemd/user/serving-sglang.env
+
+# Clean up any stale container from a prior run (idempotent; ignored on
+# first start where there's nothing to remove).
+ExecStartPre=-/usr/bin/docker --host ${DOCKER_HOST} stop serving-sglang
+ExecStartPre=-/usr/bin/docker --host ${DOCKER_HOST} rm serving-sglang
+
+# sh -c lets the shell do word-splitting: when $EXTRA_ARGS is empty it
+# disappears entirely (systemd's own ${EXTRA_ARGS} substitution would
+# instead pass an empty argv element, which argparse rejects). `exec`
+# keeps PID continuity so Type=exec semantics still apply.
+ExecStart=/bin/sh -c 'exec /usr/bin/docker --host "$DOCKER_HOST" run --name serving-sglang --rm \
+  --runtime nvidia --gpus all \
+  --network host --shm-size 8g \
+  -v "$HF_CACHE":/root/.cache/huggingface \
+  -e HF_HOME=/root/.cache/huggingface \
+  "$IMAGE" \
+  python3 -m sglang.launch_server \
+    --model-path "$MODEL_PATH" \
+    --host 127.0.0.1 --port "$PORT" \
+    --attention-backend triton \
+    --mem-fraction-static "$MEM_FRACTION_STATIC" \
+    --disable-cuda-graph \
+    --log-level info \
+    $EXTRA_ARGS'
+
+# -t 30: SGLang takes ~5–10s to drain; longer if a JIT compile is mid-flight.
+ExecStop=/usr/bin/docker --host ${DOCKER_HOST} stop -t 30 serving-sglang
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=serving-sglang
+
+[Install]
+WantedBy=default.target
