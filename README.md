@@ -48,7 +48,7 @@ serving/
 │   ├── orin/                  pinned config for Orin (sm_87)
 │   └── thor/                  pinned config for Thor (sm_103) — when we have a Thor box
 ├── runbooks/
-│   ├── hephaestus-deploy.md
+│   ├── deploy.md
 │   └── ...
 └── .github/workflows/
     └── build-sglang.yml   GitHub-hosted ubuntu-24.04-arm runner
@@ -66,11 +66,11 @@ SBSA). Native aarch64 — no QEMU — and `nvcc` cross-compiles for
 sm_87 (Orin) and sm_103 (Thor) via `TORCH_CUDA_ARCH_LIST` at build
 time. The output is a Jetson-Tegra-targeted image; GitHub's hosted
 runners have no Jetson hardware, so end-to-end smoke testing (CUDA
-paths actually executing) happens manually on Hephaestus after each
-successful CI build. **Hephaestus must never be configured as a
-GitHub self-hosted runner**, and the remote CI must not hold any
-secrets that link back to the device — the public CI surface stays
-strictly isolated from the dev box.
+paths actually executing) happens manually on Jetson hardware after
+each successful CI build. **The on-hardware validation host must
+never be configured as a GitHub self-hosted runner**, and the remote
+CI must not hold any secrets that link back to it — the public CI
+surface stays strictly isolated from on-hardware validation.
 
 The `sglang/` subtree is intended to vendor the canonical
 [`dusty-nv/jetson-containers`](https://github.com/dusty-nv/jetson-containers/tree/master/packages/llm/sglang)
@@ -99,31 +99,15 @@ the model registry).
 See `docs/SGLANG-ADOPTION-NOTES.md` for:
 - The spike attempts that didn't work and why (PyTorch wheel
   `USE_DISTRIBUTED` vs `sm_87` constraint)
-- The working recipe (extract dustynv container via crane onto
-  orin-ssd, host Python 3.10 with patched `LD_LIBRARY_PATH`)
+- The working recipe (extract dustynv container via crane onto a
+  fast local disk, host Python 3.10 with patched `LD_LIBRARY_PATH`)
 - Measured bake-off results — SGLang vs Ollama on Llama-3.1-8B
   (TL;DR: SGLang scales to ~78 tok/s at N=8 concurrent vs Ollama's
   ~23 tok/s plateau; tied at single-user)
-- Operations: where things live on Hephaestus, start/stop, verify
+- Operations: on-host layout, start/stop, verify
 - Known gaps: SGLang 0.4.1's GGUF tokenizer doesn't recognize Llama
   3 special tokens (needs HF tokenizer dir); no `gpt_oss.py` in
   0.4.1's model registry (needs SGLang 0.5.x bump)
-
-## Hephaestus disk policy (important for the build path)
-
-Hephaestus is the Jetson Orin AGX dev box. Its root partition is
-**deliberately constrained** to emulate a production single-disk
-node (OS + TAK + NERVA via Docker + Ollama binary). The 916 GB
-`/mnt/orin-ssd` is the dev indulgence; serving-spike artifacts live
-there.
-
-**Do not migrate Docker / containerd state from root to orin-ssd.**
-That would move TAK/NERVA images onto the dev-only disk and break
-the production emulation. The Jetson-container build needs to either
-fit in root partition's residual space, or use a daemonless build
-path (we did extraction-only via
-[`crane`](https://github.com/google/go-containerregistry) on the
-spike; expect to reuse).
 
 ## Tracking
 
