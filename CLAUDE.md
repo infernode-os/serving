@@ -14,10 +14,12 @@ Work is tracked under the **INFR Jira project's "Productize SGLang serving" epic
 
 The `sglang/` subtree has two variants because the two Jetson generations need different base-image strategies:
 
-- **`sglang/orin/`** — Jetson Orin AGX (`sm_87`, JetPack 6.x, CUDA 12.6). NGC has no SGLang image for this combination, so we **vendor** the `dusty-nv/jetson-containers` SGLang recipe (MIT) and pin our own SGLang version. The Orin Dockerfile expects a `BASE_IMAGE` build-arg pointing at a `dustynv/pytorch` tag (NOT `dustynv/sglang` — we re-install fresh to avoid inheriting their stale SGLang).
+- **`sglang/orin/`** — Jetson Orin AGX (`sm_87`, JetPack 6.x, CUDA 12.6). v1 is a **thin delta on `dustynv/sglang:r36.4.0`** — the bundle that served TinyLlama and produced the 3× concurrent-throughput win over Ollama in the 2026-05-14 spike (`docs/SGLANG-ADOPTION-NOTES.md` §"Spike attempt 2"). This bundle is currently the only public combo where `torch built with USE_DISTRIBUTED=1` + sm_87 device code + a matching sgl-kernel + a matching triton coexist. INFR-91/92 documents why every other path tried so far failed.
 - **`sglang/thor/`** — Jetson Thor (`sm_103`, JetPack 7.x, CUDA 13+). NVIDIA's official `nvcr.io/nvidia/sglang:25.10-py3` targets this hardware, so the Dockerfile is a thin wrapper that adds only InferNode-specific bits. Forward-looking — no Thor box exists yet.
 
-The Orin recipe vendors upstream verbatim *except* `config.py` (pinned version) and `Dockerfile` (standalone build + tokenizer bake). `Dockerfile.upstream` is kept as a verbatim copy specifically so re-syncs from upstream are a clean diff. When re-syncing, **never auto-overwrite `config.py`** — its divergence is intentional.
+The Orin Dockerfile applies three deltas on the dustynv base: (1) remove the dataclasses backport that shadows the stdlib, (2) bake `TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1` ENV (Triton 3.2 + Torch 2.5 break torch._inductor at import), (3) bake Llama-3 / Llama-3.1 tokenizer dirs at `/opt/tokenizers/` (INFR-78). That's the whole delta — base image is otherwise untouched.
+
+`Dockerfile.upstream`, `install.sh`, `build.sh`, and `config.py` are leftovers from a deprecated build approach (vendoring jetson-containers' install scripts). They are no longer driven by the build; INFR-91 documents why that path can't produce a working image standalone. Marked unused in `sglang/orin/README.md` Files table; safe to delete after one release cycle if nobody revisits.
 
 ## Commands
 
@@ -25,21 +27,18 @@ The Orin recipe vendors upstream verbatim *except* `config.py` (pinned version) 
 
 CI is `.github/workflows/build-sglang.yml`, runs on `ubuntu-24.04-arm` (Graviton SBSA, native aarch64 — no QEMU). Triggered on push to `main` under `sglang/**` or workflow-yml changes, on tags `v*`, on PRs, and via `workflow_dispatch`. Pushes to `ghcr.io/infernode-os/serving-sglang:{orin,thor}-<sha>` and `:{orin,thor}-latest`.
 
-`workflow_dispatch` inputs let you override `orin_base_image` and `sglang_version` without code changes — use this when bumping SGLang or chasing a new dustynv base tag.
+`workflow_dispatch` exposes `orin_base_image` as an override input — use when exploring an alternate dustynv tag (e.g. for INFR-92's upgrade work).
 
-### Manual Orin build (on Hephaestus or any aarch64 host with the right base)
+### Manual Orin build (on Hephaestus dev daemon, or any aarch64 host)
 
 ```sh
 cd sglang/orin
-docker build \
-  --build-arg BASE_IMAGE=dustynv/pytorch:2.6-r36.4.0-cu128-24.04 \
-  --build-arg SGLANG_VERSION=0.5.3 \
-  --build-arg SGLANG_VERSION_SPEC=0.5.3 \
-  --build-arg IS_SBSA=0 \
+docker --host unix:///run/docker-dev.sock build \
+  --build-arg BASE_IMAGE=dustynv/sglang:r36.4.0 \
   -t serving-sglang:orin-local .
 ```
 
-If the pinned 0.5.3 fails to build, fall back: 0.5.2 → 0.5.1 → 0.5.0 → 0.4.5+. Document the working pin in `sglang/orin/config.py`'s `package = [ … ]` and update `sglang/orin/README.md`'s "Pinned version" line.
+(Drop `--host` on a field-deployment Orin AGX. The dev-daemon socket is Hephaestus-specific — see `runbooks/hephaestus-deploy.md` §0.1.)
 
 ### Manual Thor build
 
@@ -47,19 +46,20 @@ If the pinned 0.5.3 fails to build, fall back: 0.5.2 → 0.5.1 → 0.5.0 → 0.4
 docker build -t serving-sglang:thor-local sglang/thor/
 ```
 
-### Smoke tests (run inside the built container)
+### Smoke tests
+
+The on-hardware validator launches `sglang.launch_server` with TinyLlama, asserts `/health`, asserts the `KV Cache is allocated` startup line, and exercises `/v1/chat/completions`. **Run it after every published-image pull** — CI's build-time guards can only check metadata (no GPU on the GitHub runner):
 
 ```sh
-# Basic SGLang import + CUDA visibility
-docker run --rm --gpus all --runtime nvidia serving-sglang:orin-local \
-  python3 /opt/sglang/test.py
-
-# gpt-oss model class present (INFR-77 acceptance gate)
-docker run --rm --gpus all --runtime nvidia serving-sglang:orin-local \
-  python3 -c "import sglang.srt.models.gpt_oss as m; print(m.__file__)"
+docker --host unix:///run/docker-dev.sock run --rm \
+  --runtime nvidia --gpus all \
+  -v /mnt/orin-ssd/huggingface:/root/.cache/huggingface \
+  -e HF_HOME=/root/.cache/huggingface \
+  serving-sglang:orin-local \
+  /opt/sglang/validate-on-hardware.sh
 ```
 
-End-to-end smoke testing happens **manually on Hephaestus** after each successful CI build — GitHub's hosted runners have no Jetson hardware. The deploy + healthcheck sequence is in `runbooks/hephaestus-deploy.md`.
+Expected last line: `All on-hardware checks passed.`. Serving smoke takes ~60s cold, ~15s warm. Deploy + healthcheck sequence is in `runbooks/hephaestus-deploy.md`.
 
 ## Hephaestus dual-purpose model (do NOT violate — INFR-90)
 
@@ -103,29 +103,20 @@ A pre-INFR-79 single-`LLM_BACKEND_URL` config must keep working unchanged. The b
 
 | Path | What it is |
 |---|---|
-| `sglang/orin/config.py` | jetson-containers package config; **intentionally divergent** from upstream — pinned to our Orin-compatible SGLang version |
-| `sglang/orin/Dockerfile` | Standalone production build (modified from upstream) |
-| `sglang/orin/Dockerfile.upstream` | Verbatim upstream copy, kept for diff against re-syncs |
-| `sglang/orin/bake-tokenizers.sh` | InferNode-authored — bakes Llama-3 / Llama-3.1 tokenizer dirs into `/opt/tokenizers/` (INFR-78 fix for GGUF tokenizer not registering Llama-3 special tokens) |
+| `sglang/orin/Dockerfile` | Thin delta on `dustynv/sglang:r36.4.0` — dataclasses-backport removal, torch.compile-disable ENV, tokenizer bake. That's the whole delta |
+| `sglang/orin/validate-on-hardware.sh` | On-hardware validator with real `/v1/chat/completions` smoke + KV-cache assertion — the safety net for any base-image bump |
+| `sglang/orin/bake-tokenizers.sh` | InferNode-authored — bakes Llama-3 / Llama-3.1 tokenizer dirs into `/opt/tokenizers/` (INFR-78) |
+| `sglang/orin/{Dockerfile.upstream,install.sh,build.sh,config.py}` | Leftovers from the deprecated framework-vendoring path; not driven by the build. Slated for removal after one release cycle |
 | `sglang/LICENSE-UPSTREAM.md` | Records the dusty-nv commit SHA at vendoring; consult before re-syncing |
-| `docs/SGLANG-ADOPTION-NOTES.md` | Spike findings, measured bake-off (SGLang ~78 tok/s @ N=8 vs Ollama's ~23 tok/s plateau), original launch flags |
+| `docs/SGLANG-ADOPTION-NOTES.md` | Spike findings, measured bake-off (SGLang ~78 tok/s @ N=8 vs Ollama's ~23 tok/s plateau), the canonical working recipe |
 | `runbooks/hephaestus-deploy.md` | End-to-end Hephaestus deploy; acceptance gate is "new contributor brings SGLang up in <15 min" |
 | `runbooks/lucibridge-routing.md` | Routing config schema + per-tool / per-category mapping |
-
-## Vendored install-script gotchas (Orin Dockerfile)
-
-The dusty-nv `install.sh` / `build.sh` we vendor were designed to run *inside* the upstream jetson-containers framework, which provides a long chain of prereqs implicitly. Three of them bit us when we tried to build standalone, and the fixes all live in our `Dockerfile`:
-
-1. **`uv` is not on PATH in the base image.** Upstream chains a `uv`-install package as a previous stage. We `pip install uv` ourselves before invoking `install.sh`.
-2. **`PIP_WHEEL_DIR` is not exported.** Upstream sets it from a parent stage. We export it via `ENV` in our Dockerfile.
-3. **`uv` ignores `PIP_INDEX_URL`** — it only reads `UV_INDEX_URL` / `UV_EXTRA_INDEX_URL`. The dustynv base image sets `PIP_INDEX_URL` to the JetPack mirror (`https://pypi.jetson-ai-lab.dev/jp6/cu128`) which has Jetson-built CUDA wheels for torch/triton with `sm_87` device code. Without `UV_INDEX_URL` set, `uv pip install sglang[all]` resolves torch from upstream PyPI and pulls the **CPU wheel**, silently clobbering the base image's CUDA torch. The image then runs but reports `cuda False` on a Tegra GPU. We set `UV_INDEX_URL` + `UV_EXTRA_INDEX_URL` + `UV_INDEX_STRATEGY=unsafe-best-match` at the Dockerfile layer.
-
-**General rule when vendoring jetson-containers recipes:** verify every implicit framework dependency. Things to grep for in the vendored scripts that signal an implicit prereq: `uv` (the installer), `PIP_WHEEL_DIR`, `TORCH_CUDA_ARCH_LIST`, `IS_SBSA`, `FORCE_BUILD`, anything ending in `_VERSION`. Set them at the Dockerfile layer rather than patching the vendored scripts (keeps the diff against upstream clean).
 
 ## Conventions worth knowing
 
 - **Launch arguments live in the runbook, not the image.** No `CMD` / `ENTRYPOINT` is baked into the production Dockerfiles so the same image can serve different model paths without rebuild. When changing launch flags, update `runbooks/hephaestus-deploy.md` §3 and §5 (systemd unit) together.
-- **Tokenizer path is mandatory for Llama-3 family.** SGLang 0.4/0.5's GGUF tokenizer doesn't register Llama-3 special tokens; `--tokenizer-path /opt/tokenizers/llama-3.1` (baked by `bake-tokenizers.sh`) is the fix. See INFR-78.
-- **`TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1` and `--disable-cuda-graph` are required on Jetson** — `torch.compile` and CUDA-graph capture are unreliable on Tegra. Don't remove these without re-running the spike.
-- **The `IS_SBSA=0` build-arg matters.** Jetson Tegra (`IS_SBSA=0`) and datacenter ARM SBSA (`IS_SBSA=1`) take different code paths in `install.sh` / `build.sh`. Orin builds always pass `IS_SBSA=0`.
+- **Tokenizer path is mandatory for Llama-3 family, not for the TinyLlama smoke.** SGLang 0.4's GGUF tokenizer doesn't register Llama-3 special tokens; `--tokenizer-path /opt/tokenizers/llama-3.1` (baked by `bake-tokenizers.sh`) is the fix. TinyLlama uses Llama-2's tokenizer and doesn't need the override. See INFR-78.
+- **`TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1` and `--disable-cuda-graph` are required on Jetson** — `torch.compile` is broken at-import in this Triton 3.2 + Torch 2.5 combo (it pulls in `torch._inductor.runtime.hints` which calls `fields(AttrsDescriptor)` on a non-dataclass), and CUDA-graph capture is unreliable on Tegra. The two env vars are baked into the image; don't remove without re-running the validator.
+- **The dataclasses backport must stay removed.** dustynv ships a Python-2-era `dataclasses.py` in `/usr/local/lib/python3.10/dist-packages/` that shadows the stdlib. The Dockerfile moves it to `_disabled_backports/` and asserts the stdlib is now what resolves. If a future base-image bump re-introduces it, the same pattern works.
+- **CI guards are metadata-only; `validate-on-hardware.sh` is the real gate.** GitHub-hosted runners have no GPU, so the in-Dockerfile guards can only check torch+CUDA metadata, triton import, and the sglang version pin. Real correctness lives in the on-hardware validator's serving smoke. Always run the validator after pulling a new tag on Hephaestus.
 - **NGC pulls are anonymous by default.** The `NGC_API_KEY` step in CI is forward-compatible scaffolding for any future gated tag — don't make it a hard requirement.

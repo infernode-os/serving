@@ -1,101 +1,93 @@
-# SGLang for Jetson Orin AGX (sm_87, JetPack 6.x, CUDA 12.9)
+# SGLang for Jetson Orin AGX (sm_87, JetPack 6.x, CUDA 12.6)
 #
-# **v1 ships with dustynv's bundled SGLang 0.4.9** — no upgrade. This is a
-# deliberate rollback from the 0.5.4 attempt (commit a5b9b84 → e3bc786):
-# SGLang 0.5.x strictly pins sgl-kernel 0.3.16.post3, but that wheel ships
-# only sm_90/sm_100 binaries. Cross-arch fallback at *import* time succeeds,
-# but kernel calls (rmsnorm, etc.) fail at *runtime* with "no kernel image
-# available for execution on the device". Building sgl-kernel 0.3.16.post3
-# from source for sm_87 is blocked by an upstream broken deepgemm commit
-# SHA in sgl-kernel's CMakeLists.txt (FetchContent_Populate fails). See
-# INFR-92 for the path to a working sgl-kernel-from-source build.
+# **v1 ships SGLang 0.4.1.post7 on the spike-proven dustynv base.** This is
+# the bundle that served TinyLlama and ran the Ollama-vs-SGLang bake-off on
+# 2026-05-14 (docs/SGLANG-ADOPTION-NOTES.md §"Spike attempt 2"), measured at
+# ~3× aggregate throughput vs Ollama under concurrent load. The bundle is
+# self-consistent: dustynv built torch with USE_DISTRIBUTED=1 *and* sm_87
+# device code — exactly the wheel that no public index ships.
 #
-# Trade-off documented: SGLang 0.4.9 has no `gpt_oss.py` model arch, so
-# lucibridge's gpt-oss routing falls back to Ollama (per
-# `runbooks/lucibridge-routing.md` fallback semantics) until INFR-92 lands.
-# All other model architectures supported by SGLang 0.4.9 work normally —
-# this image actually *serves requests* on Orin, which the 0.5.4 attempts
-# did not.
+# v1 trade-offs accepted:
+#  * No gpt_oss.py model arch in 0.4.1 (added Aug 2025). lucibridge falls
+#    back to Ollama for gpt-oss routing per runbooks/lucibridge-routing.md.
+#  * No MXFP4 quantisation in 0.4.1's supported list.
+#  * Both deferred to INFR-92 (newer SGLang on a newer dustynv tag).
+#
+# v0.5.x attempts (INFR-91/INFR-92) and a delta upgrade on dustynv's cu129
+# image are documented in those tickets; both surfaced enough untested
+# upstream bugs that we ship the spike-proven baseline first and pursue the
+# upgrade as a follow-up against a working reference.
 #
 # Recipe:
-#   1. FROM dustynv/sglang:r36.4-cu129-24.04 (torch 2.8.0+cu129, sgl-kernel
-#      0.2.3 BUILT FOR sm_87 by dustynv, triton 3.4.0, vllm 0.9.3, sglang
-#      0.4.9 — all working on Orin out of the box).
-#   2. One-line sed patch on vllm/transformers_utils/configs/ovis.py to add
-#      exist_ok=True on the `aimv2` registration. vllm 0.9.3 + transformers
-#      4.53.1 collide because transformers 4.53+ has aimv2 natively.
+#   1. FROM dustynv/sglang:r36.4.0 (Ubuntu 22.04 / Python 3.10 / torch 2.5
+#      cu126 / triton 3.2.0 / sgl-kernel sm_87 / sglang 0.4.1.post7 editable
+#      at /workspace/sglang).
+#   2. Remove the dataclasses backport that shadows the stdlib (spike fix —
+#      dustynv bundles a Python-2-era dataclasses.py in dist-packages).
 #   3. Bake Llama-3 / Llama-3.1 tokenizer dirs at /opt/tokenizers/ (INFR-78).
-#   4. Smoke test + on-hardware validator scripts.
+#   4. Build-time guards (CI runner has no GPU) + on-hardware validator.
 
-ARG BASE_IMAGE=dustynv/sglang:r36.4-cu129-24.04
+ARG BASE_IMAGE=dustynv/sglang:r36.4.0
 FROM ${BASE_IMAGE}
 
-ARG TOKENIZER_DIR=/opt/tokenizers \
-    VENV=/opt/venv
+ARG TOKENIZER_DIR=/opt/tokenizers
 
-# vllm 0.9.3 + transformers 4.53.1 aimv2 registration collision workaround.
-# Idempotent — second run is a no-op.
-RUN sed -i \
-        's|AutoConfig.register("aimv2", AIMv2Config)|AutoConfig.register("aimv2", AIMv2Config, exist_ok=True)|' \
-        ${VENV}/lib/python3.12/site-packages/vllm/transformers_utils/configs/ovis.py \
- && grep -q 'exist_ok=True' \
-        ${VENV}/lib/python3.12/site-packages/vllm/transformers_utils/configs/ovis.py
+# torch.compile + CUDA-graph capture are unreliable on Jetson Tegra (spike
+# note in SGLANG-ADOPTION-NOTES.md §"Runtime environment"). We don't need
+# compile for serving; bake the disables into the image so any future
+# wrapper can't forget them. Runtime can still override.
+ENV TORCHDYNAMO_DISABLE=1 \
+    TORCH_COMPILE_DISABLE=1 \
+    PYTHONNOUSERSITE=1
 
-# dustynv's sglang 0.4.9 ships a SyntaxError in srt/utils.py: an orphan
-# `except FileNotFoundError:` block left behind by a refactor of
-# `get_nvgpu_memory_capacity()`. Both code paths (Jetson + non-Jetson)
-# already handle exceptions inside their own try-blocks, so the orphan
-# is plain dead syntax. dustynv apparently didn't `python -m sglang.launch_server`
-# before publishing the image. Strip the four orphan lines with a Python
-# patch (sed across multi-line block is fragile). Idempotent.
-RUN ${VENV}/bin/python3 - <<'PY'
-import re, pathlib
-p = pathlib.Path('/opt/venv/lib/python3.12/site-packages/sglang/srt/utils.py')
-src = p.read_text()
-# The orphan block sits after the inner try-except for the non-Jetson path
-# closes (two excepts, both at 8-space indent), then there's blank lines,
-# then the orphan `except` at 4-space indent. Match exactly that block.
-pattern = re.compile(
-    r'(\n\n)    except FileNotFoundError:\n'
-    r'        raise RuntimeError\(\n'
-    r'            "nvidia-smi not found\. Ensure NVIDIA drivers are installed and accessible\."\n'
-    r'        \)\n',
-    re.MULTILINE,
-)
-new, n = pattern.subn(r'\1', src)
-if n == 0:
-    # Either already patched, or upstream changed; be loud either way.
-    if 'nvidia-smi not found. Ensure NVIDIA drivers are installed and accessible.' in src:
-        raise SystemExit('FAIL: orphan-except patch did not match but error string still present')
-    print('orphan-except patch: nothing to do (already clean)')
-else:
-    p.write_text(new)
-    print(f'orphan-except patch: removed {n} block(s)')
-import ast
-ast.parse(new)  # syntactic validation
-print('utils.py: parses cleanly')
-PY
+# Remove the dataclasses backport that shadows Python 3's stdlib module.
+# dustynv bundles dataclasses-0.x (a Python-2.7 backport) in dist-packages;
+# it sits ahead of the stdlib on sys.path and breaks modern code. The
+# spike's §"Required workarounds" extracts it from the rootfs; we do the
+# same inside the image. Idempotent.
+RUN DP=/usr/local/lib/python3.10/dist-packages \
+ && mkdir -p ${DP}/_disabled_backports \
+ && if [ -f ${DP}/dataclasses.py ]; then \
+        mv ${DP}/dataclasses.py ${DP}/_disabled_backports/ ; \
+        mv ${DP}/__pycache__/dataclasses.* ${DP}/_disabled_backports/ 2>/dev/null || true ; \
+        echo "moved dataclasses backport" ; \
+    else \
+        echo "dataclasses backport already absent (idempotent re-run)" ; \
+    fi \
+ && python3 -c "import dataclasses, sys; \
+                p = dataclasses.__file__ or ''; \
+                assert 'dist-packages' not in p and 'site-packages' not in p, \
+                    f'dataclasses still resolves outside stdlib: {p}'; \
+                print('dataclasses resolves to stdlib:', p)"
 
-# Build-time guards: GPU-less CI runners limit us to metadata checks.
-# Anything that transitively imports sgl_kernel runs `_load_architecture_specific_ops()`
-# which probes for a CUDA device — fails import on the runner even when
-# the wheel is correct. Deep on-hardware checks live in validate-on-hardware.sh.
+# Build-time guards: CI runners have no GPU, so this is metadata-only.
+# Real on-hardware verification lives in validate-on-hardware.sh and runs
+# post-pull on Hephaestus / a field Orin.
 COPY validate-on-hardware.sh /opt/sglang/validate-on-hardware.sh
+COPY test.py /opt/sglang/test.py
 RUN chmod +x /opt/sglang/validate-on-hardware.sh \
- && ${VENV}/bin/python3 -c "import torch; assert torch.version.cuda is not None, f'CPU-only torch: {torch.__version__}'; print('torch:', torch.__version__, 'cuda:', torch.version.cuda)" \
- && ${VENV}/bin/python3 -c "import triton; print('triton:', triton.__version__)" \
- && ${VENV}/bin/python3 -c "import importlib.metadata as m; v=m.version('sglang'); print('sglang metadata:', v); assert v.startswith('0.4'), f'expected 0.4.x baseline (INFR-92 covers 0.5+ upgrade), got {v}'"
+ && python3 -c "import torch; assert torch.version.cuda is not None, \
+                f'CPU-only torch: {torch.__version__}'; \
+                print('torch:', torch.__version__, 'cuda:', torch.version.cuda)" \
+ && python3 -c "import triton; print('triton:', triton.__version__)" \
+ && python3 -c "import importlib.metadata as m; \
+                v = m.version('sglang'); \
+                print('sglang:', v); \
+                assert v == '0.4.1.post7', \
+                    f'expected spike-pinned sglang 0.4.1.post7 (INFR-92 covers upgrade), got {v}'"
 
 # Bake Llama-3 family tokenizer dirs (INFR-78).
 COPY bake-tokenizers.sh /tmp/
 RUN TOKENIZER_DIR=${TOKENIZER_DIR} /tmp/bake-tokenizers.sh
 
-# Upstream smoke-test script preserved at the documented path.
-COPY test.py /opt/sglang/test.py
-
+# BASE_IMAGE referenced in a label must be re-declared in this stage —
+# ARGs from before the first FROM are out of scope by default.
+ARG BASE_IMAGE
 LABEL org.opencontainers.image.source="https://github.com/infernode-os/serving"
-LABEL org.opencontainers.image.description="SGLang 0.4.9 for Jetson Orin AGX (sm_87) on JetPack 6 / CUDA 12.9 — InferNode delta on dustynv/sglang. v1; gpt_oss support pending INFR-92."
+LABEL org.opencontainers.image.description="SGLang 0.4.1.post7 for Jetson Orin AGX (sm_87) on JetPack 6 / CUDA 12.6 — spike-proven v1 on dustynv/sglang:r36.4.0. gpt-oss + MXFP4 pending INFR-92."
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.infernode.base="${BASE_IMAGE}"
+LABEL org.infernode.sglang_version="0.4.1.post7"
 LABEL org.infernode.gpt_oss_supported="false"
+LABEL org.infernode.mxfp4_supported="false"
 LABEL org.infernode.followups="INFR-92"

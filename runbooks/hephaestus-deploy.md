@@ -219,25 +219,36 @@ If the root partition is tight, `docker image prune` old SGLang images
 
 ## 2. Pre-flight checks
 
+Run the on-hardware validator. It checks CUDA + sglang import + sgl_kernel
+arch + launch_server entrypoint + tokenizer bake, **and** runs a real
+TinyLlama serve through `/v1/chat/completions`, asserting the `KV Cache is
+allocated` startup line appears.
+
 ```sh
-# CUDA visibility inside the container
-docker run --rm --runtime nvidia --gpus all "$IMAGE" \
-  python3 -c "import torch; print('cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-# Expected: "cuda True Orin" (or "NVIDIA Jetson AGX Orin")
+HF_CACHE=/mnt/orin-ssd/huggingface          # Hephaestus dev daemon
+# HF_CACHE=/var/lib/huggingface             # field-deployment Orin AGX
+mkdir -p "$HF_CACHE"
 
-# SGLang import + version
-docker run --rm --runtime nvidia --gpus all "$IMAGE" \
-  python3 /opt/sglang/test.py
-# Expected last line: "SGLang OK"
-
-# gpt-oss model class present (INFR-77 acceptance)
-docker run --rm --runtime nvidia --gpus all "$IMAGE" \
-  python3 -c "import sglang.srt.models.gpt_oss; print('gpt-oss arch present')"
+docker run --rm \
+  --runtime nvidia --gpus all \
+  -v "$HF_CACHE":/root/.cache/huggingface \
+  -e HF_HOME=/root/.cache/huggingface \
+  "$IMAGE" \
+  /opt/sglang/validate-on-hardware.sh
 ```
 
-If any of those fail, **stop**. Don't proceed to §3. The image is
-broken; either pull a different tag or rebuild from `sglang/orin/`
-(see `sglang/orin/README.md`).
+Expected last line: `All on-hardware checks passed.`. The serving smoke
+takes ~60s on a cold cache (TinyLlama download + load + 8-token completion);
+re-runs reuse the cache and complete in ~10–15s.
+
+If anything fails, **stop**. Don't proceed to §3. The image is broken;
+either pull a different tag or rebuild from `sglang/orin/` (see
+`sglang/orin/README.md`).
+
+> **v1 known skip** — step 3 (`gpt_oss arch importable`) is informational
+> and prints "skip: gpt_oss not present in this SGLang version". v1 ships
+> SGLang 0.4.1.post7 which predates gpt-oss; INFR-92 covers the upgrade.
+> lucibridge's routing falls back to Ollama for gpt-oss in the meantime.
 
 ---
 
@@ -247,8 +258,11 @@ The launch invocation that produced the bake-off in
 `docs/SGLANG-ADOPTION-NOTES.md`, adapted for the GHCR image. Bind-mounts
 keep the HF cache on `/mnt/orin-ssd` (disk policy §0).
 
+**TinyLlama smoke** — the same payload the validator runs, but interactive
+so you can watch the logs and curl by hand:
+
 ```sh
-MODEL=TinyLlama/TinyLlama-1.1B-Chat-v1.0       # smoke target
+MODEL=TinyLlama/TinyLlama-1.1B-Chat-v1.0       # smoke target — uses Llama-2 tokenizer; no --tokenizer-path needed
 HF_CACHE=/mnt/orin-ssd/huggingface
 LOGS=/mnt/orin-ssd/pdfinn/scratch/sglang-logs
 mkdir -p "$HF_CACHE" "$LOGS"
@@ -258,13 +272,10 @@ docker run --rm -it \
   --network host \
   --shm-size 8g \
   -v "$HF_CACHE":/root/.cache/huggingface \
-  -e TORCHDYNAMO_DISABLE=1 \
-  -e TORCH_COMPILE_DISABLE=1 \
   -e HF_HOME=/root/.cache/huggingface \
   "$IMAGE" \
   python3 -m sglang.launch_server \
     --model-path "$MODEL" \
-    --tokenizer-path /opt/tokenizers/llama-3.1 \
     --host 127.0.0.1 --port 30000 \
     --attention-backend triton \
     --mem-fraction-static 0.5 \
@@ -273,6 +284,14 @@ docker run --rm -it \
   2>&1 | tee "$LOGS/sglang-$(date +%s).log"
 ```
 
+**Llama-3 family launch** — for any Llama-3.x model (e.g. `unsloth/Meta-Llama-3.1-8B-Instruct` or a Llama-3-GGUF blob from Ollama's store), add the tokenizer override:
+
+```
+    --tokenizer-path /opt/tokenizers/llama-3.1 \
+```
+
+Without that override, Llama-3 special tokens (`<|eot_id|>`, `<|begin_of_text|>`, etc.) aren't registered and stop strings won't match — INFR-78. The validator's TinyLlama smoke does *not* need it.
+
 Flag notes (all carried forward from spike findings):
 
 * `--runtime nvidia --gpus all` — required for Tegra GPU passthrough.
@@ -280,10 +299,6 @@ Flag notes (all carried forward from spike findings):
   Skip `--publish` to avoid double NAT through Docker.
 * `--shm-size 8g` — SGLang's worker pool uses shared memory; default
   64 MB causes silent stalls under concurrency.
-* `--tokenizer-path /opt/tokenizers/llama-3.1` — fixes Llama-3 special
-  tokens (INFR-78). Omit only for non-Llama models; for those, set
-  `--tokenizer-path` to the appropriate baked directory or to an HF
-  repo id.
 * `--attention-backend triton` — most conservative Jetson path
   (flashinfer also works but Triton was the proven default in the spike).
 * `--mem-fraction-static 0.5` — leaves 32 GiB on the unified-memory
@@ -292,7 +307,9 @@ Flag notes (all carried forward from spike findings):
   disable for stability. Re-enable later if perf needs it.
 * `TORCHDYNAMO_DISABLE=1 / TORCH_COMPILE_DISABLE=1` — bypass
   `torch.compile`; the in-image Triton + torch combination doesn't
-  reliably JIT-compile and we don't need compile for serving.
+  reliably JIT-compile and we don't need compile for serving. **Already
+  baked into the image as ENV** — pass on the command line only to
+  override.
 
 ---
 
@@ -350,7 +367,6 @@ ExecStart=/usr/bin/docker run --name serving-sglang --rm \
   --runtime nvidia --gpus all \
   --network host --shm-size 8g \
   -v ${HF_CACHE}:/root/.cache/huggingface \
-  -e TORCHDYNAMO_DISABLE=1 -e TORCH_COMPILE_DISABLE=1 \
   -e HF_HOME=/root/.cache/huggingface \
   ${IMAGE} \
   python3 -m sglang.launch_server \
@@ -368,11 +384,11 @@ ExecStop=/usr/bin/docker stop serving-sglang
 WantedBy=multi-user.target
 ```
 
-Companion `/etc/serving-sglang.env` (chmod 0644, no secrets):
+Companion `/etc/serving-sglang.env` (chmod 0644, no secrets). The v1 example below serves Llama-3.1-8B; once INFR-92 lands and an SGLang with `gpt_oss.py` ships, swap to `openai/gpt-oss-20b` (and drop `TOKENIZER_PATH` — gpt-oss is not Llama-family):
 
 ```sh
 IMAGE=ghcr.io/infernode-os/serving-sglang:orin-<short-sha>
-MODEL_PATH=openai/gpt-oss-20b
+MODEL_PATH=unsloth/Meta-Llama-3.1-8B-Instruct
 TOKENIZER_PATH=/opt/tokenizers/llama-3.1
 PORT=30000
 MEM_FRACTION_STATIC=0.5
@@ -402,9 +418,9 @@ for the v1 cut, drawn from the spike's measured working set:
 |---|---|---|
 | OS + drivers | ~3 GiB | baseline |
 | Ollama + one resident model (Devstral GGUF Q4) | ~14 GiB | `OLLAMA_KEEP_ALIVE` default |
-| SGLang model weights (gpt-oss-20b, MXFP4 / AWQ) | ~13 GiB | `--quantization` dependent |
-| SGLang KV cache | ~9 GiB at 4096 ctx, 16 running | `--mem-fraction-static 0.5` cap |
-| Headroom | ~25 GiB | TAK / NERVA / NN bursts |
+| SGLang model weights (Llama-3.1-8B Q4 GGUF, v1) | ~5 GiB | bake-off shape; INFR-92 swaps in gpt-oss-20b at ~13 GiB |
+| SGLang KV cache | ~9 GiB at 4096 ctx, 16 running | `--mem-fraction-static 0.5` cap; the validator's TinyLlama smoke logs `K=8.8 GB V=8.8 GB` |
+| Headroom | ~25–33 GiB | TAK / NERVA / NN bursts |
 
 Tunables:
 
